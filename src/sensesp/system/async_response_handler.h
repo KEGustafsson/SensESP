@@ -4,7 +4,6 @@
 #include "sensesp.h"
 
 #include <Arduino.h>
-#include <elapsedMillis.h>
 
 #include "sensesp_base_app.h"
 #include "valueproducer.h"
@@ -45,7 +44,6 @@ class AsyncResponseHandler : public ValueConsumer<bool>,
    */
   void activate() {
     ESP_LOGV("AsyncResponseHandler", "Activating response handler");
-    elapsed_millis_ = 0;
     status_ = AsyncResponseStatus::kPending;
     this->emit(status_);
 
@@ -93,9 +91,7 @@ class AsyncResponseHandler : public ValueConsumer<bool>,
  protected:
   reactesp::DelayEvent* timeout_event_ = nullptr;
   AsyncResponseStatus status_ = AsyncResponseStatus::kReady;
-  String result_message_;
   int timeout_ = 3000;  // Default timeout in ms
-  elapsedMillis elapsed_millis_;
 };
 
 }  // namespace sensesp

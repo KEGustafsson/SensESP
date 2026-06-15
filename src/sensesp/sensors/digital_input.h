@@ -54,8 +54,7 @@ class DigitalInputState : public DigitalInput, public Sensor<bool> {
                     String config_path = "")
       : DigitalInput{pin, pin_mode},
         Sensor<bool>(config_path),
-        read_delay_{read_delay},
-        triggered_{false} {
+        read_delay_{read_delay} {
     load();
 
     repeat_event_ = event_loop()->onRepeat(read_delay_,
@@ -70,7 +69,6 @@ class DigitalInputState : public DigitalInput, public Sensor<bool> {
 
  private:
   int read_delay_;
-  bool triggered_;
   reactesp::RepeatEvent* repeat_event_ = nullptr;
   virtual bool to_json(JsonObject& root) override;
   virtual bool from_json(const JsonObject& config) override;

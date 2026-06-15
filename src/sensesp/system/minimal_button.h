@@ -79,4 +79,4 @@ class MinimalButtonHandler : public BaseButtonHandler {
 
 }  // namespace sensesp
 
-#endif  // SENSESP_SRC_SENSESP_SYSTEM_BASE_BUTTON_H_
+#endif  // SENSESP_SYSTEM_MINIMAL_BUTTON_H_

@@ -190,14 +190,13 @@ esp_err_t call_request_dispatcher(httpd_req_t* req) {
 }
 
 String get_content_type(httpd_req_t* req) {
-  if (httpd_req_get_hdr_value_len(req, "Content-Type") != 16) {
+  char content_type[32];
+  if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type,
+                                  sizeof(content_type)) != ESP_OK) {
     ESP_LOGE(__FILENAME__, "Invalid content type");
     return "";
-  } else {
-    char content_type[32];
-    httpd_req_get_hdr_value_str(req, "Content-Type", content_type, 32);
-    return String(content_type);
   }
+  return String(content_type);
 }
 
 }  // namespace sensesp

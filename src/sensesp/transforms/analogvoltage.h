@@ -4,9 +4,9 @@
 #include "sensesp/ui/config_item.h"
 #include "transform.h"
 
-constexpr int kMaxAnalogOutput = 4096;
-
 namespace sensesp {
+
+constexpr int kMaxAnalogOutput = 4096;
 
 /**
  * @brief A transform that takes the output of an

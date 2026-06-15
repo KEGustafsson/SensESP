@@ -33,7 +33,7 @@ bool canConvertFromJson(JsonVariantConst src, const Position & /*position*/) {
 }
 
 bool canConvertFromJson(JsonVariantConst src, const ENUVector & /*enu*/) {
-  return src["east"].is<double>() && src["north"].is<double>();
+  return src["east"].is<float>() && src["north"].is<float>();
 }
 
 bool canConvertFromJson(JsonVariantConst src,

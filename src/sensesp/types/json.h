@@ -26,6 +26,6 @@ struct Converter<std::vector<T> > {
     return result;
   }
 };
-}  // namespace ARDUINOJSON_NAMESPACE
+}  // namespace ArduinoJson
 
 #endif  // SENSESP_SRC_SENSESP_TYPES_JSON_H_
