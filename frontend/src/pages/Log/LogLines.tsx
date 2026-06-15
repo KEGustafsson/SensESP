@@ -18,6 +18,8 @@ interface LogLine {
 type ConnState = "connecting" | "live" | "reconnecting";
 
 const POLL_INTERVAL_MS = 500;
+const FETCH_TIMEOUT_MS = 4000; // abort a stalled request so the loop recovers
+const MAX_BACKOFF_MS = 10000; // ceiling on poll spacing while the device is down
 const MAX_LINES = 1000;
 const RECONNECT_THRESHOLD = 3; // consecutive failures (~1.5 s) before "reconnecting"
 const BOTTOM_TOLERANCE_PX = 40;
@@ -76,8 +78,10 @@ export function LogLines(): JSX.Element {
         cursorRef.current === null
           ? APP_CONFIG.log_path
           : `${APP_CONFIG.log_path}?since=${cursorRef.current}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -130,14 +134,32 @@ export function LogLines(): JSX.Element {
         if (failuresRef.current >= RECONNECT_THRESHOLD) {
           setConnState("reconnecting");
         }
+      } finally {
+        clearTimeout(timeout);
       }
     }
 
-    void poll();
-    const interval = setInterval(() => void poll(), POLL_INTERVAL_MS);
+    // Self-scheduling loop: the next poll is queued only after the current one
+    // settles, so a slow device cannot accumulate overlapping in-flight
+    // requests. Spacing backs off once failures pass the reconnect threshold.
+    let timer: ReturnType<typeof setTimeout>;
+    async function loop(): Promise<void> {
+      await poll();
+      if (cancelled) {
+        return;
+      }
+      let delay = POLL_INTERVAL_MS;
+      if (failuresRef.current >= RECONNECT_THRESHOLD) {
+        const over = failuresRef.current - RECONNECT_THRESHOLD;
+        delay = Math.min(POLL_INTERVAL_MS * 2 ** (over + 1), MAX_BACKOFF_MS);
+      }
+      timer = setTimeout(() => void loop(), delay);
+    }
+
+    void loop();
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      clearTimeout(timer);
     };
   }, []);
 
