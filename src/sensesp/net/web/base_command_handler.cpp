@@ -14,26 +14,44 @@ namespace sensesp {
 namespace {
 
 /// Reject cross-origin POST requests to destructive endpoints.
+///
+/// Compares the Origin header's authority (host[:port]) against the request's
+/// own Host header. The Host header reflects whatever interface the browser
+/// actually used, so this is same-origin for every access path — soft-AP IP,
+/// station IP, mDNS name, or custom DNS — without a hardcoded allowlist.
+/// Requests without an Origin header (non-browser clients) are allowed.
+///
+/// An Origin or Host that does not fit the buffer is rejected rather than
+/// treated as absent: a legitimate same-origin request to this device is always
+/// short, so an over-long header can only be a forgery attempt and must fail
+/// closed.
 bool check_origin(httpd_req_t* req) {
-  char origin[128] = {0};
-  if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) ==
-      ESP_OK) {
-    String origin_str(origin);
-    String hostname = SensESPBaseApp::get_hostname();
-    if (origin_str.indexOf(hostname) < 0) {
-      // Check the active provisioner's local IP — works for both WiFi
-      // and Ethernet without depending on the WiFi library directly.
-      auto provisioner = SensESPApp::get()->get_network_provisioner();
-      String ip =
-          provisioner ? provisioner->local_ip().toString() : String("");
-      if (ip.length() == 0 || origin_str.indexOf(ip) < 0) {
-        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
-                            "Cross-origin request rejected");
-        return false;
-      }
-    }
+  if (httpd_req_get_hdr_value_len(req, "Origin") == 0) {
+    return true;
   }
-  return true;
+
+  char origin[128] = {0};
+  char host[128] = {0};
+  if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) !=
+          ESP_OK ||
+      httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+    httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
+                        "Cross-origin request rejected");
+    return false;
+  }
+
+  String origin_str(origin);
+  int scheme_end = origin_str.indexOf("://");
+  String origin_authority =
+      scheme_end < 0 ? origin_str : origin_str.substring(scheme_end + 3);
+
+  if (origin_authority == host) {
+    return true;
+  }
+
+  httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
+                      "Cross-origin request rejected");
+  return false;
 }
 
 }  // namespace
