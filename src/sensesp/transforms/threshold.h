@@ -42,7 +42,7 @@ class ThresholdTransform : public Transform<C, bool> {
   }
 
   bool from_json(const JsonObject& root) override {
-    String expected[] = {"min", "max", "in_range", "out_range"};
+    String expected[] = {"min", "max", "in_range"};
     for (auto str : expected) {
 
       if (!root[str].is<JsonVariant>()) {
