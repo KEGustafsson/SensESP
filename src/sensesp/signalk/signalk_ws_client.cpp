@@ -1020,7 +1020,11 @@ void SKWSClient::poll_access_request(const String server_address,
     }
   }
 
-  ESP_LOGD(__FILENAME__, "Poll response: http=%d, payload=%s", http_code, payload.c_str());
+  // An APPROVED poll response carries the access token in its body, so log only
+  // the status and size, never the payload itself. The web log buffer exposes
+  // captured log lines over HTTP, so a payload dump here would leak the token.
+  ESP_LOGD(__FILENAME__, "Poll response: http=%d, %d bytes", http_code,
+           static_cast<int>(payload.length()));
 
   esp_http_client_close(client);
   esp_http_client_cleanup(client);
