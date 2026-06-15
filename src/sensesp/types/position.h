@@ -40,7 +40,8 @@ struct ENUVector {
   float north;
   float up = kPositionInvalidAltitude;
 
-  ENUVector() : east(kInvalidDouble), north(kInvalidDouble) {}
+  ENUVector()
+      : east(kPositionInvalidAltitude), north(kPositionInvalidAltitude) {}
   ENUVector(float east, float north, float up = kPositionInvalidAltitude)
       : east(east), north(north), up(up) {}
 };
@@ -58,7 +59,9 @@ struct AttitudeVector {
   float yaw;  // heading
 
   AttitudeVector()
-      : roll(kInvalidDouble), pitch(kInvalidDouble), yaw(kInvalidDouble) {}
+      : roll(kPositionInvalidAltitude),
+        pitch(kPositionInvalidAltitude),
+        yaw(kPositionInvalidAltitude) {}
   AttitudeVector(float roll, float pitch, float yaw)
       : roll(roll), pitch(pitch), yaw(yaw) {}
 };

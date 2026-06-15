@@ -18,10 +18,10 @@ bool HTTPDigestAuthenticator::authenticate_request(httpd_req_t* req) {
     return true;
   } else if (result == 0) {
     request_authentication(req, false);
-    return 0;
+    return false;
   } else {
     request_authentication(req, true);
-    return 0;
+    return false;
   }
 }
 

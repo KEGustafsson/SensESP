@@ -38,14 +38,11 @@ class BaseBlinker {
    * Flip the LED off and on for `duration` milliseconds.
    */
   void blip(int duration = 20) {
-    // indicator for a blip being in progress
-    static bool blipping = false;
-
     // only allow one blip at a time
-    if (blipping) {
+    if (blipping_) {
       return;
     }
-    blipping = true;
+    blipping_ = true;
 
     bool const orig_state = this->state_;
     this->set_state(false);
@@ -61,10 +58,10 @@ class BaseBlinker {
               if (this->update_counter_ == new_counter) {
                 this->set_state(orig_state);
               }
-              blipping = false;
+              blipping_ = false;
             });
           } else {
-            blipping = false;
+            blipping_ = false;
           }
         });
   }
@@ -95,6 +92,7 @@ class BaseBlinker {
   bool enabled_ = true;
   bool state_ = false;
   int update_counter_ = 0;
+  bool blipping_ = false;
   reactesp::Event* event_ = NULL;
 };
 
@@ -127,9 +125,7 @@ class LEDPattern {
   LEDPattern(const std::vector<LEDPatternFragment>& fragments)
       : fragments_(fragments) {}
   LEDPattern(const std::initializer_list<LEDPatternFragment>& fragments)
-      : fragments_(fragments),
-        current_fragment_idx_(0),
-        fragment_begin_ms_(0) {}
+      : fragments_(fragments) {}
 
   // Assignment operator
   LEDPattern& operator=(const LEDPattern& other) {

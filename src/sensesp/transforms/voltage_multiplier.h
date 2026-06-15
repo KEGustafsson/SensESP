@@ -32,7 +32,7 @@ class VoltageMultiplier : public FloatTransform {
  public:
   VoltageMultiplier(uint16_t R1, uint16_t R2, const String& config_path = "");
 
-  virtual void set(const float& input);
+  virtual void set(const float& input) override;
 
  private:
   uint16_t R1_{};

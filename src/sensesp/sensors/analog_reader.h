@@ -11,9 +11,6 @@ namespace sensesp {
  * @brief Used by AnalogInput as a hardware abstraction layer
  **/
 class BaseAnalogReader {
- private:
-  int output_scale_;
-
  public:
   virtual float read() = 0;
 };

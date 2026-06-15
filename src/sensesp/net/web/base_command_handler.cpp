@@ -180,8 +180,6 @@ void add_routes_handlers(std::shared_ptr<HTTPServer>& server) {
   JsonDocument json_doc;
   JsonArray routes_json = json_doc.to<JsonArray>();
 
-  int sz = routes.size();
-
   for (auto it = routes.begin(); it != routes.end(); ++it) {
     routes_json.add(it->as_json());
   }
