@@ -3,6 +3,8 @@ import { APP_CONFIG } from "config";
 import { type JSX } from "preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
+import { LEVELS, levelClass, visibleLines, type Level } from "./filtering";
+
 interface LogResponse {
   session: number;
   next: number;
@@ -24,33 +26,18 @@ const MAX_LINES = 1000;
 const RECONNECT_THRESHOLD = 3; // consecutive failures (~1.5 s) before "reconnecting"
 const BOTTOM_TOLERANCE_PX = 40;
 
-/**
- * Bootstrap text class for a line, keyed on the esp-idf level letter. Returns
- * null for continuation lines (backtraces, multi-line messages) so they can
- * inherit the previous line's level.
- */
-function levelClass(text: string): string | null {
-  switch (text.charAt(0)) {
-    case "E":
-      return "text-danger";
-    case "W":
-      return "text-warning";
-    case "I":
-      return "text-body";
-    case "D":
-    case "V":
-      return "text-secondary";
-    default:
-      return null;
-  }
-}
-
 export function LogLines(): JSX.Element {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [connState, setConnState] = useState<ConnState>("connecting");
   const [following, setFollowing] = useState(true);
   const [gapNotice, setGapNotice] = useState(false);
   const [restartNotice, setRestartNotice] = useState(false);
+
+  // Display-only filters over the buffered tail. Default to Info+ and hide the
+  // viewer's own /api/log polling lines.
+  const [minLevel, setMinLevel] = useState<Level>("I");
+  const [query, setQuery] = useState("");
+  const [showPolling, setShowPolling] = useState(false);
 
   const cursorRef = useRef<number | null>(null);
   const sessionRef = useRef<number | null>(null);
@@ -163,13 +150,14 @@ export function LogLines(): JSX.Element {
     };
   }, []);
 
-  // Follow the tail only while pinned to the bottom.
+  // Follow the tail only while pinned to the bottom. Also re-anchor when a
+  // filter change shrinks or grows the visible set.
   useEffect(() => {
     const el = containerRef.current;
     if (el !== null && followingRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [lines]);
+  }, [lines, minLevel, query, showPolling]);
 
   function handleScroll(): void {
     const el = containerRef.current;
@@ -191,19 +179,12 @@ export function LogLines(): JSX.Element {
     setFollow(true);
   }
 
-  // Continuation lines inherit the previous line's level class.
-  let lastClass = "text-body";
-  const rendered = lines.map((line) => {
-    const cls = levelClass(line.text);
-    if (cls !== null) {
-      lastClass = cls;
-    }
-    return (
-      <div key={line.id} className={`text-nowrap ${lastClass}`}>
-        {line.text}
-      </div>
-    );
-  });
+  const visible = visibleLines(lines, { minLevel, query, showPolling });
+  const rendered = visible.map(({ line, level }) => (
+    <div key={line.id} className={`text-nowrap ${levelClass(level)}`}>
+      {line.text}
+    </div>
+  ));
 
   let statusLabel: string;
   let statusClass: string;
@@ -235,6 +216,42 @@ export function LogLines(): JSX.Element {
         )}
       </div>
 
+      <div className="d-flex align-items-center flex-wrap gap-2 mb-2">
+        <select
+          className="form-select form-select-sm w-auto"
+          value={minLevel}
+          onChange={(e) => setMinLevel(e.currentTarget.value as Level)}
+          aria-label="Minimum log level (this level and more severe)"
+        >
+          {LEVELS.map((l) => (
+            <option value={l.value} key={l.value}>
+              {l.label} and up
+            </option>
+          ))}
+        </select>
+        <input
+          type="search"
+          className="form-control form-control-sm w-auto"
+          placeholder="Filter text…"
+          value={query}
+          onInput={(e) => setQuery(e.currentTarget.value)}
+          aria-label="Filter log text"
+        />
+        <div className="form-check form-switch ms-auto">
+          <input
+            className="form-check-input"
+            type="checkbox"
+            role="switch"
+            id="log-show-polling"
+            checked={showPolling}
+            onChange={(e) => setShowPolling(e.currentTarget.checked)}
+          />
+          <label className="form-check-label" htmlFor="log-show-polling">
+            Show polling requests
+          </label>
+        </div>
+      </div>
+
       <div
         ref={containerRef}
         onScroll={handleScroll}
@@ -243,7 +260,11 @@ export function LogLines(): JSX.Element {
         tabIndex={0}
         aria-label="Device log"
       >
-        {rendered}
+        {rendered.length > 0 ? (
+          rendered
+        ) : (
+          <div className="text-secondary fst-italic">No matching lines.</div>
+        )}
       </div>
 
       <ToastMessage
