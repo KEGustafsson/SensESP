@@ -9,6 +9,7 @@
 docs/Gemfile.lock
 docs/.bundle
 docs/_site
+docs/generated
 docs/plans
 docs/superpowers
 managed_components

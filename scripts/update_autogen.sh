@@ -20,10 +20,5 @@ if ! git diff-index --quiet HEAD --; then
     git commit -am "Update the web UI source files for version ${VERSION}"
 fi
 
-# udpate the doxygen docs
-
-git rm -rf docs/generated
-mkdir -p docs/generated
-doxygen
-git add docs/generated
-git commit -m "Update the Doxygen docs for version ${VERSION}"
+# The Doxygen class documentation is generated and published by the
+# "Deploy docs to GitHub Pages" workflow on merge to main, not committed here.
