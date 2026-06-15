@@ -51,9 +51,13 @@ class StatusPageItem : public StatusPageItemBase, public ObservableValue<T> {
   StatusPageItem(String name, const T& value, String group, int order)
       : StatusPageItemBase(name, group, order), ObservableValue<T>(value) {
           if (status_page_items_.count(name) > 0) {
-            ESP_LOGW("StatusPageItem", "Duplicate status page item name: %s", name.c_str());
+            ESP_LOGW("StatusPageItem",
+                     "Duplicate status page item name: %s; keeping the first "
+                     "registration and ignoring this one",
+                     name.c_str());
+          } else {
+            status_page_items_[name] = this;
           }
-          status_page_items_[name] = this;
   }
 
   protected:
