@@ -225,7 +225,7 @@ export function LogLines(): JSX.Element {
         >
           {LEVELS.map((l) => (
             <option value={l.value} key={l.value}>
-              {l.label} and up
+              {l.label}
             </option>
           ))}
         </select>
