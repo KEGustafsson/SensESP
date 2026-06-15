@@ -2,6 +2,7 @@
 
 #include "sensesp/net/http_server.h"
 
+#include <cstring>
 #include <functional>
 #include <list>
 #include <lwip/sockets.h>
@@ -38,7 +39,13 @@ void urldecode2(char* dst, const char* src) {
 }
 
 esp_err_t HTTPServer::dispatch_request(httpd_req_t* req) {
-  ESP_LOGI(__FILENAME__, "Handling request: %s", req->uri);
+  // Log only the path, not the query string: the captured log is served over
+  // HTTP (and the server is unauthenticated by default), so a future endpoint
+  // carrying a secret as a query parameter must not echo it into the log.
+  const char* query = strchr(req->uri, '?');
+  int path_len = query ? static_cast<int>(query - req->uri)
+                       : static_cast<int>(strlen(req->uri));
+  ESP_LOGI(__FILENAME__, "Handling request: %.*s", path_len, req->uri);
 
   if (captive_portal_) {
     bool captured;
