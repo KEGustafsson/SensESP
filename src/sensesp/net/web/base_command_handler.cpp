@@ -1,5 +1,9 @@
 #include "base_command_handler.h"
 
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+
 #include "sensesp/net/web/autogen/frontend_files.h"
 #include "sensesp/system/log_buffer.h"
 #include "sensesp/ui/status_page_item.h"
@@ -109,8 +113,16 @@ void add_http_log_handler(std::shared_ptr<HTTPServer>& server) {
             char value[16];
             if (httpd_query_key_value(query, "since", value, sizeof(value)) ==
                 ESP_OK) {
-              since = strtoul(value, nullptr, 10);
-              has_since = true;
+              // Accept only a clean, in-range unsigned integer; ignore garbage
+              // so a stale or crafted cursor cannot corrupt the client's view.
+              char* end = nullptr;
+              errno = 0;
+              unsigned long parsed = strtoul(value, &end, 10);
+              if (end != value && *end == '\0' && errno == 0 &&
+                  parsed <= UINT32_MAX) {
+                since = static_cast<uint32_t>(parsed);
+                has_since = true;
+              }
             }
           }
         }

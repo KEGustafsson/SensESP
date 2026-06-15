@@ -140,6 +140,56 @@ void test_no_gap_on_empty_caught_up() {
   TEST_ASSERT_EQUAL(0, snap.next);
 }
 
+void test_gap_when_all_lines_age_evicted() {
+  LogBuffer buf(200, /*max_age_ms=*/1000, 128);
+  push(buf, "a", 0);  // seq 0
+  push(buf, "b", 0);  // seq 1
+
+  // A later poll past the age window prunes the whole buffer. The client's
+  // cursor (0) predates next_seq_ (2), so this is a gap, not caught-up.
+  LogSnapshot snap = buf.snapshot_since(0, /*has_since=*/true, 5000);
+  TEST_ASSERT_EQUAL(0, buf.size());
+  TEST_ASSERT_EQUAL(0, snap.lines.size());
+  TEST_ASSERT_TRUE(snap.gap);
+  TEST_ASSERT_EQUAL(2, snap.next);
+}
+
+void test_post_reboot_stale_cursor_no_gap() {
+  // After a reboot next_seq_ restarts low while a client may still hold a high
+  // cursor. since > next_seq_ must read as caught-up (no gap, no lines), letting
+  // the client detect the reset rather than seeing a phantom gap.
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "x", 10);  // seq 0
+  push(buf, "y", 10);  // seq 1
+
+  LogSnapshot snap = buf.snapshot_since(/*since=*/99, /*has_since=*/true, 10);
+  TEST_ASSERT_EQUAL(0, snap.lines.size());
+  TEST_ASSERT_FALSE(snap.gap);
+  TEST_ASSERT_EQUAL(2, snap.next);
+}
+
+void test_prune_keeps_lines_when_now_before_timestamp() {
+  // now_ms earlier than a record's timestamp (e.g. millis() wrap) must not
+  // underflow the age math and evict everything.
+  LogBuffer buf(200, /*max_age_ms=*/1000, 128);
+  push(buf, "kept", /*now_ms=*/5000);
+
+  LogSnapshot snap = buf.snapshot_since(0, /*has_since=*/false, /*now_ms=*/10);
+  TEST_ASSERT_EQUAL(1, buf.size());
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("kept", snap.lines[0].c_str());
+}
+
+void test_bare_newline_dropped() {
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "\r\n", 10);
+  push(buf, "", 10);
+
+  LogSnapshot snap = buf.snapshot_since(0, /*has_since=*/false, 10);
+  TEST_ASSERT_EQUAL(0, snap.lines.size());
+  TEST_ASSERT_EQUAL(0, snap.next);  // empty lines do not advance the sequence
+}
+
 // ---------------------------------------------------------------------------
 // Session id
 // ---------------------------------------------------------------------------
@@ -173,6 +223,10 @@ void setup() {
 
   RUN_TEST(test_gap_flag_when_cursor_evicted);
   RUN_TEST(test_no_gap_on_empty_caught_up);
+  RUN_TEST(test_gap_when_all_lines_age_evicted);
+  RUN_TEST(test_post_reboot_stale_cursor_no_gap);
+  RUN_TEST(test_prune_keeps_lines_when_now_before_timestamp);
+  RUN_TEST(test_bare_newline_dropped);
 
   RUN_TEST(test_session_id_stable_across_calls);
 

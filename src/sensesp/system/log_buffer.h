@@ -52,7 +52,9 @@ struct LogSnapshot {
  *
  * Thread-safety: a FreeRTOS mutex guards the buffer. The append path performs
  * no logging itself, so the hook cannot recurse. The HTTP reader copies lines
- * out while holding the mutex and must not log while holding it.
+ * out while holding the mutex and must not log while holding it. Capture is
+ * skipped in ISR context (a blocking mutex take is illegal there); the line is
+ * still forwarded to UART via the chained handler.
  */
 class LogBuffer {
  public:
@@ -68,11 +70,10 @@ class LogBuffer {
    * @brief Append a pre-formatted log line to the buffer.
    *
    * Trailing CR/LF is stripped and the text is truncated to max_line_length.
-   * The explicit-time overload exists for testing age-based eviction; the
-   * default uses esp_log_timestamp().
+   * `now_ms` is the capture time (esp_log_timestamp() in production); tests pass
+   * an explicit value to exercise age-based eviction.
    */
   void push_line(const char* text, size_t length, uint32_t now_ms);
-  void push_line(const char* text, size_t length);
 
   /**
    * @brief Return retained lines newer than `since`.

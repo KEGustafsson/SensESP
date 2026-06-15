@@ -2,6 +2,7 @@
 
 #include <esp_log.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 #include <cstdio>
 #include <cstring>
@@ -22,11 +23,16 @@ LogBuffer::LogBuffer(size_t max_lines, uint32_t max_age_ms,
     : max_lines_(max_lines),
       max_age_ms_(max_age_ms),
       max_line_length_(max_line_length),
-      session_id_(esp_random()) {
+      session_id_(0) {
   mutex_ = xSemaphoreCreateMutexStatic(&mutex_buffer_);
 }
 
 void LogBuffer::install() {
+  // Draw the per-boot session id here rather than in the constructor: the hook
+  // is installed during setup(), past early static init, and mixing in the boot
+  // timer makes a repeated value across reboots unlikely even before the RF
+  // subsystem seeds the RNG. The client also falls back to a cursor reset.
+  session_id_ = esp_random() ^ static_cast<uint32_t>(esp_timer_get_time());
   instance_ = this;
   previous_vprintf_ = esp_log_set_vprintf(&LogBuffer::vprintf_trampoline);
 }
@@ -44,7 +50,10 @@ int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
     va_end(copy);
   }
 
-  if (inst != nullptr) {
+  // Capture into the buffer, but never from an ISR: push_line takes a blocking
+  // mutex, which is illegal in interrupt context. UART output already happened
+  // above, so an ISR-context line is forwarded but not captured.
+  if (inst != nullptr && !xPortInIsrContext()) {
     char buf[256];
     va_list copy;
     va_copy(copy, args);
@@ -81,10 +90,6 @@ void LogBuffer::push_line(const char* text, size_t length, uint32_t now_ms) {
     records_.pop_front();
   }
   xSemaphoreGive(mutex_);
-}
-
-void LogBuffer::push_line(const char* text, size_t length) {
-  push_line(text, length, esp_log_timestamp());
 }
 
 void LogBuffer::prune_locked(uint32_t now_ms) {
