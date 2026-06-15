@@ -1,7 +1,15 @@
 import { ToastMessage } from "components/ToastMessage";
 import { APP_CONFIG } from "config";
 import { type JSX } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
+
+import {
+  isSelfPolling,
+  LEVELS,
+  levelClass,
+  visibleLines,
+  type Level,
+} from "./filtering";
 
 interface LogResponse {
   session: number;
@@ -24,27 +32,6 @@ const MAX_LINES = 1000;
 const RECONNECT_THRESHOLD = 3; // consecutive failures (~1.5 s) before "reconnecting"
 const BOTTOM_TOLERANCE_PX = 40;
 
-/**
- * Bootstrap text class for a line, keyed on the esp-idf level letter. Returns
- * null for continuation lines (backtraces, multi-line messages) so they can
- * inherit the previous line's level.
- */
-function levelClass(text: string): string | null {
-  switch (text.charAt(0)) {
-    case "E":
-      return "text-danger";
-    case "W":
-      return "text-warning";
-    case "I":
-      return "text-body";
-    case "D":
-    case "V":
-      return "text-secondary";
-    default:
-      return null;
-  }
-}
-
 export function LogLines(): JSX.Element {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [connState, setConnState] = useState<ConnState>("connecting");
@@ -52,16 +39,31 @@ export function LogLines(): JSX.Element {
   const [gapNotice, setGapNotice] = useState(false);
   const [restartNotice, setRestartNotice] = useState(false);
 
+  // Display-only filters over the buffered tail. Default to Info+ and hide the
+  // viewer's own /api/log polling lines.
+  const [minLevel, setMinLevel] = useState<Level>("I");
+  const [query, setQuery] = useState("");
+  const [showPolling, setShowPolling] = useState(false);
+
   const cursorRef = useRef<number | null>(null);
   const sessionRef = useRef<number | null>(null);
   const nextIdRef = useRef(0);
   const failuresRef = useRef(0);
   const followingRef = useRef(true);
+  const showPollingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const showPollingId = useId();
 
   function setFollow(value: boolean): void {
     followingRef.current = value;
     setFollowing(value);
+  }
+
+  // The poll loop reads showPolling via a ref so the long-lived effect closure
+  // sees the current value without re-subscribing.
+  function setShowPollingValue(value: boolean): void {
+    showPollingRef.current = value;
+    setShowPolling(value);
   }
 
   // Stable identities: ToastMessage/useToast lists onHide in an effect
@@ -112,9 +114,15 @@ export function LogLines(): JSX.Element {
         if (data.gap) {
           setGapNotice(true);
         }
-        if (data.lines.length > 0) {
+        // Drop the viewer's own polling lines at ingest unless the user opted
+        // in, so self-poll noise never consumes the bounded line buffer and
+        // evicts lines the user is waiting for.
+        const incoming = showPollingRef.current
+          ? data.lines
+          : data.lines.filter((text) => !isSelfPolling(text));
+        if (incoming.length > 0) {
           setLines((prev) => {
-            const added = data.lines.map((text) => ({
+            const added = incoming.map((text) => ({
               id: nextIdRef.current++,
               text,
             }));
@@ -163,13 +171,14 @@ export function LogLines(): JSX.Element {
     };
   }, []);
 
-  // Follow the tail only while pinned to the bottom.
+  // Follow the tail only while pinned to the bottom. Also re-anchor when a
+  // filter change shrinks or grows the visible set.
   useEffect(() => {
     const el = containerRef.current;
     if (el !== null && followingRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [lines]);
+  }, [lines, minLevel, query]);
 
   function handleScroll(): void {
     const el = containerRef.current;
@@ -191,19 +200,12 @@ export function LogLines(): JSX.Element {
     setFollow(true);
   }
 
-  // Continuation lines inherit the previous line's level class.
-  let lastClass = "text-body";
-  const rendered = lines.map((line) => {
-    const cls = levelClass(line.text);
-    if (cls !== null) {
-      lastClass = cls;
-    }
-    return (
-      <div key={line.id} className={`text-nowrap ${lastClass}`}>
-        {line.text}
-      </div>
-    );
-  });
+  const visible = visibleLines(lines, { minLevel, query });
+  const rendered = visible.map(({ line, level }) => (
+    <div key={line.id} className={`text-nowrap ${levelClass(level)}`}>
+      {line.text}
+    </div>
+  ));
 
   let statusLabel: string;
   let statusClass: string;
@@ -235,6 +237,42 @@ export function LogLines(): JSX.Element {
         )}
       </div>
 
+      <div className="d-flex align-items-center flex-wrap gap-2 mb-2">
+        <select
+          className="form-select form-select-sm w-auto"
+          value={minLevel}
+          onChange={(e) => setMinLevel(e.currentTarget.value as Level)}
+          aria-label="Minimum log level (this level and more severe)"
+        >
+          {LEVELS.map((l) => (
+            <option value={l.value} key={l.value}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+        <input
+          type="search"
+          className="form-control form-control-sm w-auto"
+          placeholder="Filter text…"
+          value={query}
+          onInput={(e) => setQuery(e.currentTarget.value)}
+          aria-label="Filter log text"
+        />
+        <div className="form-check form-switch ms-auto">
+          <input
+            className="form-check-input"
+            type="checkbox"
+            role="switch"
+            id={showPollingId}
+            checked={showPolling}
+            onChange={(e) => setShowPollingValue(e.currentTarget.checked)}
+          />
+          <label className="form-check-label" htmlFor={showPollingId}>
+            Show polling requests
+          </label>
+        </div>
+      </div>
+
       <div
         ref={containerRef}
         onScroll={handleScroll}
@@ -243,7 +281,11 @@ export function LogLines(): JSX.Element {
         tabIndex={0}
         aria-label="Device log"
       >
-        {rendered}
+        {rendered.length > 0 ? (
+          rendered
+        ) : (
+          <div className="text-secondary fst-italic">No matching lines.</div>
+        )}
       </div>
 
       <ToastMessage
