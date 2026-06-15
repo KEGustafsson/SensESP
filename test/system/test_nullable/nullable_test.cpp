@@ -4,6 +4,12 @@
  *
  * Exercises validity detection, the invalid sentinel value, implicit
  * conversions, and JSON conversion across several type specializations.
+ *
+ * Note on semantics: a Nullable holds a plain value plus a per-type invalid
+ * sentinel (e.g. float -> -1e9, uint8_t -> 0xff). A value is "invalid" only
+ * when it equals that sentinel. A default-constructed Nullable holds T{} (0),
+ * which is therefore VALID for types whose sentinel differs from 0 (int,
+ * float, uint8_t) and INVALID only for bool, whose sentinel is false.
  */
 
 #include <Arduino.h>
@@ -14,37 +20,48 @@
 using namespace sensesp;
 
 // ---------------------------------------------------------------------------
-// Default-constructed values are invalid; assigned values are valid
+// The invalid sentinel reads as invalid; ordinary values read as valid
 // ---------------------------------------------------------------------------
 
-void test_nullable_int_default_is_invalid() {
-  NullableInt n;
-  TEST_ASSERT_FALSE(n.is_valid());
-  TEST_ASSERT_EQUAL(NullableInt::invalid(), n.value());
+void test_nullable_invalid_sentinel_is_not_valid() {
+  NullableInt i = NullableInt::invalid();
+  TEST_ASSERT_FALSE(i.is_valid());
+
+  NullableFloat f = NullableFloat::invalid();
+  TEST_ASSERT_FALSE(f.is_valid());
+
+  Nullable<uint8_t> u = Nullable<uint8_t>::invalid();
+  TEST_ASSERT_FALSE(u.is_valid());
 }
 
-void test_nullable_int_assigned_is_valid() {
-  NullableInt n = 42;
-  TEST_ASSERT_TRUE(n.is_valid());
-  TEST_ASSERT_EQUAL(42, n.value());
-  TEST_ASSERT_EQUAL(42, static_cast<int>(n));  // implicit conversion
+void test_nullable_value_is_valid() {
+  NullableInt i = 42;
+  TEST_ASSERT_TRUE(i.is_valid());
+  TEST_ASSERT_EQUAL(42, i.value());
+  TEST_ASSERT_EQUAL(42, static_cast<int>(i));  // implicit conversion
+
+  NullableFloat f = 3.14f;
+  TEST_ASSERT_TRUE(f.is_valid());
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 3.14f, f.value());
+
+  Nullable<uint8_t> u = 5;
+  TEST_ASSERT_TRUE(u.is_valid());
+  TEST_ASSERT_EQUAL_UINT8(5, u.value());
 }
 
-void test_nullable_float_invalid_sentinel() {
+void test_nullable_default_float_is_valid_zero() {
+  // A default-constructed value is T{} (0). For float the sentinel is -1e9,
+  // so the default is a valid zero -- it is NOT the invalid value.
   NullableFloat n;
-  TEST_ASSERT_FALSE(n.is_valid());
-  TEST_ASSERT_FLOAT_WITHIN(1.0f, -1e9f, n.value());
-
-  NullableFloat valid = 3.14f;
-  TEST_ASSERT_TRUE(valid.is_valid());
-  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 3.14f, valid.value());
+  TEST_ASSERT_TRUE(n.is_valid());
+  TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, n.value());
 }
 
-void test_nullable_bool_invalid_is_false() {
-  // bool's invalid sentinel is `false`, so a default Nullable<bool> is
+void test_nullable_bool_sentinel_is_false() {
+  // bool's invalid sentinel is `false`, so a default/false Nullable<bool> is
   // invalid and a value of `false` is indistinguishable from invalid.
-  NullableBool n;
-  TEST_ASSERT_FALSE(n.is_valid());
+  NullableBool d;
+  TEST_ASSERT_FALSE(d.is_valid());
 
   NullableBool t = true;
   TEST_ASSERT_TRUE(t.is_valid());
@@ -52,16 +69,6 @@ void test_nullable_bool_invalid_is_false() {
 
   NullableBool f = false;
   TEST_ASSERT_FALSE(f.is_valid());
-}
-
-void test_nullable_uint8_invalid_sentinel() {
-  Nullable<uint8_t> n;
-  TEST_ASSERT_FALSE(n.is_valid());
-  TEST_ASSERT_EQUAL_UINT8(0xff, n.value());
-
-  Nullable<uint8_t> valid = 0;
-  TEST_ASSERT_TRUE(valid.is_valid());  // 0 is a valid uint8_t value
-  TEST_ASSERT_EQUAL_UINT8(0, valid.value());
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +100,7 @@ void test_nullable_copy_assignment() {
 
 void test_nullable_to_json_invalid_is_null() {
   JsonDocument doc;
-  NullableFloat n;  // invalid
+  NullableFloat n = NullableFloat::invalid();
   doc["v"] = n;
   TEST_ASSERT_TRUE(doc["v"].isNull());
 }
@@ -130,11 +137,10 @@ void setup() {
 
   UNITY_BEGIN();
 
-  RUN_TEST(test_nullable_int_default_is_invalid);
-  RUN_TEST(test_nullable_int_assigned_is_valid);
-  RUN_TEST(test_nullable_float_invalid_sentinel);
-  RUN_TEST(test_nullable_bool_invalid_is_false);
-  RUN_TEST(test_nullable_uint8_invalid_sentinel);
+  RUN_TEST(test_nullable_invalid_sentinel_is_not_valid);
+  RUN_TEST(test_nullable_value_is_valid);
+  RUN_TEST(test_nullable_default_float_is_valid_zero);
+  RUN_TEST(test_nullable_bool_sentinel_is_false);
   RUN_TEST(test_nullable_ptr_mutates_value);
   RUN_TEST(test_nullable_copy_assignment);
   RUN_TEST(test_nullable_to_json_invalid_is_null);
