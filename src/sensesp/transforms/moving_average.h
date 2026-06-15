@@ -44,6 +44,7 @@ class MovingAverage : public FloatTransform {
   int ptr_ = 0;
   int sample_size_;
   float multiplier_;
+  float sum_ = 0;
   bool initialized_;
 };
 
