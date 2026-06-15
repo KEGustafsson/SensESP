@@ -4,10 +4,15 @@
 namespace sensesp {
 
 /**
- * @brief Dummy Startable class for backward compatibility.
+ * @brief No-op Startable shim kept only for source compatibility.
  *
+ * All methods are no-ops: there is no startup ordering or callback dispatch.
+ * Startup is now handled by the event loop, so inheritance from this class
+ * should be removed.
  */
-class Startable {
+class [[deprecated(
+    "Startable is a no-op kept only for source compatibility; remove "
+    "inheritance, startup is handled by the event loop")]] Startable {
  public:
   Startable(int priority = 0) {}
   virtual void start() {}
