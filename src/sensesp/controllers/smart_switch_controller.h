@@ -105,7 +105,7 @@ class SmartSwitchController : public ValueProducer<bool>, FileSystemSaveable {
     this->emit(this->is_on_);
   }};
 
-  LambdaConsumer<bool> swich_consumer_{[this](bool value) {
+  LambdaConsumer<bool> switch_consumer_{[this](bool value) {
     this->is_on_ = value;
     this->emit(is_on_);
   }};
