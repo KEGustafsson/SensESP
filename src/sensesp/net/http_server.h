@@ -106,9 +106,11 @@ class HTTPServer : public FileSystemSaveable {
       if (error != ESP_OK) {
         ESP_LOGE(__FILENAME__, "Error starting HTTP server: %s",
                  esp_err_to_name(error));
-      } else {
-        ESP_LOGI(__FILENAME__, "HTTP server started");
+        // Registering handlers or announcing mDNS against a failed handle would
+        // leave the device advertising a dead web UI with no further signal.
+        return;
       }
+      ESP_LOGI(__FILENAME__, "HTTP server started");
 
       // register the request dispatcher for all methods and all URIs
       httpd_uri_t uri = {
