@@ -1,9 +1,15 @@
 import { ToastMessage } from "components/ToastMessage";
 import { APP_CONFIG } from "config";
 import { type JSX } from "preact";
-import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
 
-import { LEVELS, levelClass, visibleLines, type Level } from "./filtering";
+import {
+  isSelfPolling,
+  LEVELS,
+  levelClass,
+  visibleLines,
+  type Level,
+} from "./filtering";
 
 interface LogResponse {
   session: number;
@@ -44,11 +50,20 @@ export function LogLines(): JSX.Element {
   const nextIdRef = useRef(0);
   const failuresRef = useRef(0);
   const followingRef = useRef(true);
+  const showPollingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const showPollingId = useId();
 
   function setFollow(value: boolean): void {
     followingRef.current = value;
     setFollowing(value);
+  }
+
+  // The poll loop reads showPolling via a ref so the long-lived effect closure
+  // sees the current value without re-subscribing.
+  function setShowPollingValue(value: boolean): void {
+    showPollingRef.current = value;
+    setShowPolling(value);
   }
 
   // Stable identities: ToastMessage/useToast lists onHide in an effect
@@ -99,9 +114,15 @@ export function LogLines(): JSX.Element {
         if (data.gap) {
           setGapNotice(true);
         }
-        if (data.lines.length > 0) {
+        // Drop the viewer's own polling lines at ingest unless the user opted
+        // in, so self-poll noise never consumes the bounded line buffer and
+        // evicts lines the user is waiting for.
+        const incoming = showPollingRef.current
+          ? data.lines
+          : data.lines.filter((text) => !isSelfPolling(text));
+        if (incoming.length > 0) {
           setLines((prev) => {
-            const added = data.lines.map((text) => ({
+            const added = incoming.map((text) => ({
               id: nextIdRef.current++,
               text,
             }));
@@ -157,7 +178,7 @@ export function LogLines(): JSX.Element {
     if (el !== null && followingRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [lines, minLevel, query, showPolling]);
+  }, [lines, minLevel, query]);
 
   function handleScroll(): void {
     const el = containerRef.current;
@@ -179,7 +200,7 @@ export function LogLines(): JSX.Element {
     setFollow(true);
   }
 
-  const visible = visibleLines(lines, { minLevel, query, showPolling });
+  const visible = visibleLines(lines, { minLevel, query });
   const rendered = visible.map(({ line, level }) => (
     <div key={line.id} className={`text-nowrap ${levelClass(level)}`}>
       {line.text}
@@ -242,11 +263,11 @@ export function LogLines(): JSX.Element {
             className="form-check-input"
             type="checkbox"
             role="switch"
-            id="log-show-polling"
+            id={showPollingId}
             checked={showPolling}
-            onChange={(e) => setShowPolling(e.currentTarget.checked)}
+            onChange={(e) => setShowPollingValue(e.currentTarget.checked)}
           />
-          <label className="form-check-label" htmlFor="log-show-polling">
+          <label className="form-check-label" htmlFor={showPollingId}>
             Show polling requests
           </label>
         </div>

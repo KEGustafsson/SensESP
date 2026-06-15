@@ -1,6 +1,5 @@
-// Pure, component-free filtering logic for the Log page. Kept separate from
-// LogLines so it can be reasoned about (and unit-tested if a harness is added)
-// in isolation.
+// Pure, component-free filtering logic for the Log page, separate from the
+// LogLines component.
 
 export type Level = "E" | "W" | "I" | "D" | "V";
 
@@ -28,15 +27,16 @@ const LEVEL_CLASS: Record<Level, string> = {
 const DEFAULT_LEVEL: Level = "I";
 
 // The web UI polls these endpoints (the Log page hits /api/log, the status page
-// hits /api/info), and the HTTP server logs every request, so the viewer
-// captures its own polling. Hidden by default.
+// hits /api/info) and the HTTP server logs every request, so the viewer captures
+// its own polling. The http_server tag is part of the marker so a user line that
+// merely mentions the path is not mistaken for a poll.
 const SELF_POLL_MARKERS = [
-  "Handling request: /api/log",
-  "Handling request: /api/info",
+  "http_server.cpp: Handling request: /api/log",
+  "http_server.cpp: Handling request: /api/info",
 ];
 
 /** The esp-idf level letter of a line, or null for a continuation line. */
-export function lineLevel(text: string): Level | null {
+function lineLevel(text: string): Level | null {
   const c = text.charAt(0);
   return c === "E" || c === "W" || c === "I" || c === "D" || c === "V"
     ? c
@@ -55,7 +55,6 @@ export function isSelfPolling(text: string): boolean {
 export interface LogFilter {
   minLevel: Level;
   query: string;
-  showPolling: boolean;
 }
 
 export interface LeveledLine<T> {
@@ -71,7 +70,7 @@ export interface LeveledLine<T> {
  * runs over every line, including filtered-out ones, so inheritance is stable
  * regardless of what the filter hides. A line passes when its effective level is
  * at least as severe as the minimum AND the query (case-insensitive substring)
- * matches AND it is not hidden self-polling output.
+ * matches. Self-poll suppression happens at ingest, not here.
  */
 export function visibleLines<T extends { text: string }>(
   lines: T[],
@@ -91,9 +90,6 @@ export function visibleLines<T extends { text: string }>(
       continue;
     }
     if (query !== "" && !line.text.toLowerCase().includes(query)) {
-      continue;
-    }
-    if (!filter.showPolling && isSelfPolling(line.text)) {
       continue;
     }
     result.push({ line, level: effective });
