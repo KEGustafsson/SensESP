@@ -44,10 +44,7 @@ export function ToastMessage({
         aria-atomic="true"
       >
         <div className="d-flex">
-          <div className="toast-body">
-            <br />
-            {children}
-          </div>
+          <div className="toast-body">{children}</div>
           <button
             type="button"
             className="btn-close me-2 m-auto"
