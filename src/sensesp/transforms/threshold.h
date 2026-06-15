@@ -14,9 +14,8 @@ namespace sensesp {
  *   @param max_value Maximum value of input for output to be the value of
  * in_range.
  *
- *   @param in_range Output value if input value is in range.
- *
- *   @param out_range Output value if input value is out of the range.
+ *   @param in_range Output value if input value is in range. The output is
+ * the negation of this value when the input is out of range.
  */
 template <typename C>
 class ThresholdTransform : public Transform<C, bool> {
