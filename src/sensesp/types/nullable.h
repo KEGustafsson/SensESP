@@ -8,8 +8,11 @@ namespace sensesp {
 /**
  * @brief Template class that supports a special invalid magic value for a type.
  *
- * The invalid value is always provided by the type's default constructor.
- *
+ * Each specialization defines an invalid sentinel (see nullable.cpp; e.g. float
+ * -> -1e9, uint8_t -> 0xff), matching the NMEA 2000 "missing data" values. A
+ * value is invalid only when it equals that sentinel. A default-constructed
+ * Nullable holds T{} (0), so it is valid for types whose sentinel differs from
+ * 0; use Nullable<T>::invalid() to obtain the invalid value explicitly.
  */
 template <typename T>
 class Nullable {
