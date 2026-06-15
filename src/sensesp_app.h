@@ -20,6 +20,7 @@
 #include "sensesp/signalk/signalk_delta_queue.h"
 #include "sensesp/signalk/signalk_ws_client.h"
 #include "sensesp/system/button.h"
+#include "sensesp/system/log_buffer.h"
 #include "sensesp/system/system_status_led.h"
 #include "sensesp/ui/status_page_item.h"
 #include "sensesp_base_app.h"
@@ -211,6 +212,11 @@ class SensESPApp : public SensESPBaseApp {
   void setup() {
     // call the parent setup()
     SensESPBaseApp::setup();
+
+    // Install the log capture hook as early as practical so the web Log page
+    // can show startup logging. UART output is preserved via the chained
+    // handler. (Pre-WiFi early-boot and ISR-path output bypass the hook.)
+    log_buffer_.install();
 
     ap_ssid_ = SensESPBaseApp::get_hostname();
 
@@ -445,6 +451,8 @@ class SensESPApp : public SensESPBaseApp {
 
   std::shared_ptr<MDNSDiscovery> mdns_discovery_;
   std::shared_ptr<HTTPServer> http_server_;
+
+  LogBuffer log_buffer_;
 
   std::shared_ptr<BaseSystemStatusLed> system_status_led_;
   std::shared_ptr<SystemStatusController> system_status_controller_ =
