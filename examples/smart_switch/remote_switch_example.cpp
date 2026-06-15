@@ -103,7 +103,7 @@ void setup() {
   // sent across the Signal K network when the controlling device
   // confirms it has made the change in state.
   auto* sk_listener = new SKValueListener<bool>(sk_path);
-  sk_listener->connect_to(controller->swich_consumer_);
+  sk_listener->connect_to(controller->switch_consumer_);
 }
 
 void loop() { event_loop()->tick(); }
