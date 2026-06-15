@@ -3,6 +3,7 @@ export const APP_CONFIG = {
   api_host_url: "",
   config_path: "/api/config",
   info_path: "/api/info",
+  log_path: "/api/log",
   signalk_path: "/api/signalk",
   route_path: "/api/routes",
   wifi_scan_path: "/api/wifi/scan",

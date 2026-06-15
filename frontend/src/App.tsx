@@ -2,6 +2,7 @@ import NavPathContext from "common/NavPathContext";
 import { RestartRequiredProvider } from "common/RestartRequiredContext";
 import { Header } from "components/Header";
 import { ConfigurationPage } from "pages/Configuration";
+import { LogPage } from "pages/Log";
 import { SignalKPage } from "pages/SignalK";
 import { StatusPage } from "pages/Status";
 import { SystemPage } from "pages/System";
@@ -30,6 +31,7 @@ type KnownComponents = {
 const KNOWN_COMPONENTS: KnownComponents = {
   StatusPage,
   SystemPage,
+  LogPage,
   WiFiConfigPage,
   SignalKPage,
   ConfigurationPage,
