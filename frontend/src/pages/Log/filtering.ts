@@ -27,9 +27,13 @@ const LEVEL_CLASS: Record<Level, string> = {
 // leading continuation line.
 const DEFAULT_LEVEL: Level = "I";
 
-// The web Log page polls this endpoint, and the HTTP server logs every request,
-// so the viewer captures its own polling. Hidden by default.
-const SELF_POLL_MARKER = "Handling request: /api/log";
+// The web UI polls these endpoints (the Log page hits /api/log, the status page
+// hits /api/info), and the HTTP server logs every request, so the viewer
+// captures its own polling. Hidden by default.
+const SELF_POLL_MARKERS = [
+  "Handling request: /api/log",
+  "Handling request: /api/info",
+];
 
 /** The esp-idf level letter of a line, or null for a continuation line. */
 export function lineLevel(text: string): Level | null {
@@ -45,7 +49,7 @@ export function levelClass(level: Level): string {
 }
 
 export function isSelfPolling(text: string): boolean {
-  return text.includes(SELF_POLL_MARKER);
+  return SELF_POLL_MARKERS.some((marker) => text.includes(marker));
 }
 
 export interface LogFilter {
