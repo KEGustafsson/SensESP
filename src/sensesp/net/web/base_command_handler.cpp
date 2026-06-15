@@ -111,17 +111,18 @@ void add_http_log_handler(std::shared_ptr<HTTPServer>& server) {
   auto log_handler = std::make_shared<HTTPRequestHandler>(
       1 << HTTP_GET, "/api/log", [](httpd_req_t* req) {
         LogBuffer* log_buffer = LogBuffer::instance();
-        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
         if (log_buffer == nullptr) {
           httpd_resp_sendstr(
               req, "{\"session\":0,\"next\":0,\"gap\":false,\"lines\":[]}");
           return ESP_OK;
         }
 
-        // Access control: none of its own. /api/log is gated by the global
-        // dispatcher auth, exactly like /api/info. check_origin() is anti-CSRF
-        // for destructive POSTs and gives no read protection, so it is not used
-        // here.
+        // Access control: none of its own, like /api/info. The only gate is the
+        // dispatcher's HTTP auth, which is off by default — so /api/log mirrors
+        // the serial log to anyone who can reach the web server unless web auth
+        // is enabled. check_origin() is anti-CSRF for destructive POSTs and
+        // gives no read protection, so it is not used here.
         uint32_t since = 0;
         bool has_since = false;
         size_t query_len = httpd_req_get_url_query_len(req) + 1;
