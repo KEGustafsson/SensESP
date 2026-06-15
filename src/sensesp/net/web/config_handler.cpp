@@ -2,11 +2,24 @@
 
 #include "config_handler.h"
 
+#include <cstring>
 #include <memory>
 
 #include "sensesp/ui/config_item.h"
 
 namespace sensesp {
+
+namespace {
+
+// Length of the path portion of a URI, excluding any query string. The query
+// may carry secrets and the captured log is served over HTTP, so only the path
+// is logged (see HTTPServer::dispatch_request).
+int uri_path_len(const char* uri) {
+  const char* query = strchr(uri, '?');
+  return query ? static_cast<int>(query - uri) : static_cast<int>(strlen(uri));
+}
+
+}  // namespace
 
 bool get_item_data(JsonDocument& doc,
                    const std::shared_ptr<ConfigItemBase>& item) {
@@ -37,7 +50,8 @@ bool get_item_data(JsonDocument& doc,
 }
 
 esp_err_t handle_config_item_list(httpd_req_t* req) {
-  ESP_LOGI("ConfigHandler", "GET request to URL %s", req->uri);
+  ESP_LOGI("ConfigHandler", "GET request to URL %.*s", uri_path_len(req->uri),
+           req->uri);
   String url = String(req->uri);
   String query = "";
   if (url.indexOf('?') != -1) {
@@ -88,7 +102,8 @@ void add_config_list_handler(std::shared_ptr<HTTPServer>& server) {
 void add_config_get_handler(std::shared_ptr<HTTPServer>& server) {
   auto handler = std::make_shared<HTTPRequestHandler>(
       1 << HTTP_GET, "/api/config/*", [](httpd_req_t* req) {
-        ESP_LOGD("ConfigHandler", "GET request to URL %s", req->uri);
+        ESP_LOGD("ConfigHandler", "GET request to URL %.*s",
+                 uri_path_len(req->uri), req->uri);
         String url_tail = String(req->uri).substring(11);
         String path;
         String query = "";
@@ -132,7 +147,8 @@ void add_config_put_handler(std::shared_ptr<HTTPServer>& server) {
   auto handler = std::make_shared<HTTPRequestHandler>(
       1 << HTTP_PUT, "/api/config/*",
       [](httpd_req_t* req) {  // check that the content type is JSON
-        ESP_LOGI(__FILENAME__, "PUT request to URL %s", req->uri);
+        ESP_LOGI(__FILENAME__, "PUT request to URL %.*s",
+                 uri_path_len(req->uri), req->uri);
         if (get_content_type(req) != "application/json") {
           httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                               "application/json content type expected");
