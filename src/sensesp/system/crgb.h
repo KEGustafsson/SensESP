@@ -1,6 +1,7 @@
 #ifndef SENSESP_SYSTEM_CRGB_H_
 #define SENSESP_SYSTEM_CRGB_H_
 
+#include <cmath>
 #include <cstdint>
 
 namespace sensesp {
@@ -123,7 +124,9 @@ inline uint8_t apply_brightness(uint8_t value, uint8_t brightness) {
  * @return Luminance value (0-255)
  */
 inline uint8_t rgb_to_luminance(uint8_t r, uint8_t g, uint8_t b) {
-  return static_cast<uint8_t>(0.2126 * r + 0.7152 * g + 0.0722 * b);
+  // Round to nearest: the weights sum to just under 1.0 in floating point, so
+  // truncation would map pure white (255,255,255) to 254 instead of 255.
+  return static_cast<uint8_t>(std::lround(0.2126 * r + 0.7152 * g + 0.0722 * b));
 }
 
 /**
