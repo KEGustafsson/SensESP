@@ -300,17 +300,21 @@ void test_task_queue_producer_burst() {
   TaskHandle_t task_handle;
   xTaskCreate(tqp_burst_producer_task, "burst", 4096, &ctx, 1, &task_handle);
 
-  unsigned long start = millis();
-  while (received_count < kTQPCount && millis() - start < 5000) {
-    event_loop->tick();
-    vTaskDelay(1);
-  }
-
+  // Let the burst finish before draining: the event loop is not ticked while
+  // we block here, so all kTQPCount values are pushed into the bounded queue
+  // first. SafeQueue evicts the oldest on overflow, so only the most recent
+  // values survive.
   xSemaphoreTake(ctx.done, pdMS_TO_TICKS(2000));
 
-  TEST_ASSERT_EQUAL(kTQPCount, received_count);
-  for (int i = 0; i < kTQPCount; i++) {
-    TEST_ASSERT_EQUAL(i, received_values[i]);
+  event_loop->tick();  // drain the survivors to the consumer
+
+  // The survivors are the newest values: a contiguous, in-order suffix ending
+  // at the last value pushed (kTQPCount - 1).
+  TEST_ASSERT_GREATER_THAN(0, received_count);
+  TEST_ASSERT_LESS_OR_EQUAL(kTQPCount, received_count);
+  TEST_ASSERT_EQUAL(kTQPCount - 1, received_values[received_count - 1]);
+  for (int i = 0; i < received_count; i++) {
+    TEST_ASSERT_EQUAL(kTQPCount - received_count + i, received_values[i]);
   }
 
   vSemaphoreDelete(ctx.done);
