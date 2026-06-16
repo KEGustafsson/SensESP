@@ -77,7 +77,13 @@ void CurveInterpolator::set(const float& input) {
   if (it != samples_.end()) {
     float x1 = it->input_;
     float y1 = it->output_;
-    output_ = (y0 * (x1 - input) + y1 * (input - x0)) / (x1 - x0);
+    if (x1 == x0) {
+      // Exact hit on a sample point (e.g. the lowest one, where the search
+      // never advances past begin()) — avoid a zero-width interval divide.
+      output_ = y1;
+    } else {
+      output_ = (y0 * (x1 - input) + y1 * (input - x0)) / (x1 - x0);
+    }
   } else {
     // Hit the end of the table with no match, calculate output using the
     // gradient from the last two points
