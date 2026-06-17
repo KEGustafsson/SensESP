@@ -295,7 +295,22 @@ std::shared_ptr<ConfigItemT<T>> ConfigItem(std::shared_ptr<T> config_object) {
   return config_item;
 }
 
-// Unsafe: We don't know whether other shared_ptrs to the same object exist!
+/**
+ * @brief Register a ConfigItemT, transferring ownership of a raw pointer.
+ *
+ * Convenience overload for the `new T(...)` idiom used throughout the
+ * examples. It wraps @p config_object in a `std::shared_ptr` and registers
+ * it, so the configuration registry becomes the sole owner.
+ *
+ * @warning This overload TAKES OWNERSHIP. The caller must pass a pointer that
+ * is not owned by anyone else: allocate it with `new` and never `delete` it,
+ * never wrap it in another `std::shared_ptr`, and never pass a pointer to a
+ * stack or member object. Violating this causes a double free. When in doubt,
+ * use the `std::shared_ptr<T>` overload and keep ownership explicit.
+ *
+ * The raw-pointer ownership model is a v3 carry-over; the planned v4 ownership
+ * refactor (#900) removes it. See #893.
+ */
 template <typename T>
 std::shared_ptr<ConfigItemT<T>> ConfigItem(T* config_object) {
   auto config_object_sptr = std::shared_ptr<T>(config_object);
