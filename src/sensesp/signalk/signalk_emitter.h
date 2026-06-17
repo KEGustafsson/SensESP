@@ -27,6 +27,12 @@ class SKEmitter : virtual public Observable {
   SKEmitter(const String& sk_path);
 
   /**
+   * Unregisters this emitter from the static source registry so the
+   * registry never holds a dangling pointer.
+   */
+  virtual ~SKEmitter();
+
+  /**
    * Returns the data to be reported to the server as
    * a Signal K json object.
    */
@@ -64,6 +70,12 @@ class SKEmitter : virtual public Observable {
   void set_sk_path(const String& path) { sk_path_ = path; }
 
   static const std::vector<SKEmitter*>& get_sources() { return sources_; }
+
+  /**
+   * Empties the source registry. Intended for clean app restart and test
+   * isolation; not for normal runtime use.
+   */
+  static void clear_registry();
 
  protected:
   String sk_path_{};

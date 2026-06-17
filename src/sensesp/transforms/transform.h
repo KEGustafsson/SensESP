@@ -31,12 +31,27 @@ class TransformBase : public FileSystemSaveable {
  public:
   TransformBase(const String& config_path);
 
-  // Primary purpose of this was to supply Signal K sources
-  // (now handled by SKEmitter::get_sources). Should
-  // this be deprecated?
+  /**
+   * Unregisters this transform from the static registry so the registry
+   * never holds a dangling pointer.
+   */
+  virtual ~TransformBase();
+
+  // The transform registry's original purpose (supplying Signal K sources) is
+  // now handled by SKEmitter::get_sources(); nothing in the framework consumes
+  // get_transforms() anymore. get_sources() is not a drop-in replacement -- it
+  // returns only the Signal K emitters, not the full transform set, for which
+  // there is no equivalent accessor.
+  [[deprecated("Deprecated and unused internally; no direct replacement")]]
   static const std::set<TransformBase*>& get_transforms() {
     return transforms_;
   }
+
+  /**
+   * Empties the transform registry. Intended for clean app restart and test
+   * isolation; not for normal runtime use.
+   */
+  static void clear_registry();
 
  private:
   static std::set<TransformBase*> transforms_;

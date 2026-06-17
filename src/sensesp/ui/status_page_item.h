@@ -21,6 +21,12 @@ class StatusPageItemBase {
   StatusPageItemBase(String name, String group, int order)
       : name_(name), group_(group), order_(order) {}
 
+  /**
+   * Unregisters this item from the static registry so the registry never
+   * holds a dangling pointer.
+   */
+  virtual ~StatusPageItemBase();
+
   String& get_name() { return name_; }
 
   virtual JsonDocument as_json() = 0;
@@ -28,6 +34,12 @@ class StatusPageItemBase {
   static const std::map<String, StatusPageItemBase*>* get_status_page_items() {
     return &status_page_items_;
   }
+
+  /**
+   * Empties the status page item registry. Intended for clean app restart and
+   * test isolation; not for normal runtime use.
+   */
+  static void clear_registry();
 
  protected:
   String name_;

@@ -26,6 +26,13 @@ class SKPutListener : virtual public Observable {
    */
   SKPutListener(const String& sk_path);
 
+  /**
+   * Unregisters this listener from the static registry so the registry never
+   * holds a dangling pointer. Takes the SKListener semaphore because the WS
+   * client task iterates this registry under that same lock.
+   */
+  virtual ~SKPutListener();
+
   String& get_sk_path() { return sk_path; }
 
   virtual void parse_value(const JsonObject& put) = 0;
@@ -33,6 +40,12 @@ class SKPutListener : virtual public Observable {
   static const std::vector<SKPutListener*>& get_listeners() {
     return listeners_;
   }
+
+  /**
+   * Empties the listener registry. Intended for clean app restart and test
+   * isolation; not for normal runtime use. Takes the SKListener semaphore.
+   */
+  static void clear_registry();
 
  protected:
   String sk_path{};

@@ -1,5 +1,7 @@
 #include "signalk_listener.h"
 
+#include <algorithm>
+
 #include "sensesp/system/saveable.h"
 
 namespace sensesp {
@@ -17,6 +19,19 @@ SKListener::SKListener(const String &sk_path, int listen_delay,
       listen_delay{listen_delay} {
   listeners_.push_back(this);
   this->load();
+}
+
+SKListener::~SKListener() {
+  take_semaphore();
+  listeners_.erase(std::remove(listeners_.begin(), listeners_.end(), this),
+                   listeners_.end());
+  release_semaphore();
+}
+
+void SKListener::clear_registry() {
+  take_semaphore();
+  listeners_.clear();
+  release_semaphore();
 }
 
 bool SKListener::take_semaphore(uint64_t timeout_ms) {

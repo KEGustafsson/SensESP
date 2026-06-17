@@ -17,4 +17,8 @@ TransformBase::TransformBase(const String& config_path)
   transforms_.insert(this);
 }
 
+TransformBase::~TransformBase() { transforms_.erase(this); }
+
+void TransformBase::clear_registry() { transforms_.clear(); }
+
 }  // namespace sensesp
