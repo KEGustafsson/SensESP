@@ -55,6 +55,15 @@ class SensESPBaseApp {
   static const std::shared_ptr<SensESPBaseApp>& get() { return instance_; }
 
   /**
+   * @brief Clear all static object registries.
+   *
+   * Empties the ConfigItem, SKEmitter, Transform, StatusPageItem and UIButton
+   * registries so a subsequent app start (or a test) begins from a clean
+   * slate. Called from destroy().
+   */
+  static void clear_registries();
+
+  /**
    * @brief Destroy the SensESPBaseApp instance
    */
   virtual bool destroy() {
@@ -65,6 +74,7 @@ class SensESPBaseApp {
                "SensESPBaseApp instance has active references and won't be "
                "properly destroyed.");
     }
+    clear_registries();
     instance_ = nullptr;
     return !outside_users;
   }

@@ -70,6 +70,8 @@ std::shared_ptr<ConfigItemT<T>> ConfigItem(std::shared_ptr<T>);
 class ConfigItemBase
     : virtual public std::enable_shared_from_this<ConfigItemBase> {
  public:
+  virtual ~ConfigItemBase() = default;
+
   const String& get_title() const { return title_; }
   ConfigItemBase* set_title(const String& title) {
     title_ = title;
@@ -160,6 +162,14 @@ class ConfigItemBase
 
     return sorted_config_items;
   }
+
+  /**
+   * @brief Empty the config item registry.
+   *
+   * Releases the registry's shared_ptr references. Intended for clean app
+   * restart and test isolation; not for normal runtime use.
+   */
+  static void clear_registry();
 
   virtual bool load() = 0;
   virtual bool refresh() = 0;

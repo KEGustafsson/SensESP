@@ -4,6 +4,8 @@ namespace sensesp {
 
 std::map<String, std::shared_ptr<ConfigItemBase>> ConfigItemBase::config_items_;
 
+void ConfigItemBase::clear_registry() { config_items_.clear(); }
+
 template <>
 const char* get_schema_type_string(const int /*dummy*/) {
   return "number";

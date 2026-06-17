@@ -67,6 +67,7 @@ class SensESPApp : public SensESPBaseApp {
           "SensESPApp instance has active references and won't be properly "
           "destroyed.");
     }
+    clear_registries();
     instance_ = nullptr;
     // Also destroy the global pointer
     sensesp_app = nullptr;

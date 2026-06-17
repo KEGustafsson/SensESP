@@ -35,6 +35,14 @@ class UIButton : public Observable {
     return new_cmd.get();
   }
 
+  /**
+   * @brief Empty the button registry.
+   *
+   * Releases the registry's shared_ptr references. Intended for clean app
+   * restart and test isolation; not for normal runtime use.
+   */
+  static void clear_registry();
+
  protected:
   String title_;
   String name_;
