@@ -39,8 +39,10 @@ class TransformBase : public FileSystemSaveable {
 
   // The transform registry's original purpose (supplying Signal K sources) is
   // now handled by SKEmitter::get_sources(); nothing in the framework consumes
-  // get_transforms() anymore.
-  [[deprecated("Unused; use SKEmitter::get_sources() instead")]]
+  // get_transforms() anymore. get_sources() is not a drop-in replacement -- it
+  // returns only the Signal K emitters, not the full transform set, for which
+  // there is no equivalent accessor.
+  [[deprecated("Deprecated and unused internally; no direct replacement")]]
   static const std::set<TransformBase*>& get_transforms() {
     return transforms_;
   }

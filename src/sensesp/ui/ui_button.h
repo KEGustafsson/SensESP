@@ -40,6 +40,10 @@ class UIButton : public Observable {
    *
    * Releases the registry's shared_ptr references. Intended for clean app
    * restart and test isolation; not for normal runtime use.
+   *
+   * Like ConfigItemBase and unlike the raw-pointer registries, this registry
+   * owns its entries via shared_ptr, so there is no unregister-on-destruction:
+   * clearing the map releases the objects.
    */
   static void clear_registry();
 
