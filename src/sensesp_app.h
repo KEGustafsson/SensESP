@@ -60,18 +60,11 @@ class SensESPApp : public SensESPBaseApp {
   }
 
   virtual bool destroy() override {
-    bool outside_users = instance_.use_count() > 2;
-    if (outside_users) {
-      ESP_LOGW(
-          __FILENAME__,
-          "SensESPApp instance has active references and won't be properly "
-          "destroyed.");
-    }
-    clear_registries();
-    instance_ = nullptr;
-    // Also destroy the global pointer
+    // Drop the global pointer's reference first so the base sees the true
+    // outside-user count, then delegate the shared teardown (registry
+    // clearing, instance reset) to SensESPBaseApp::destroy().
     sensesp_app = nullptr;
-    return !outside_users;
+    return SensESPBaseApp::destroy();
   }
 
   // getters for internal members

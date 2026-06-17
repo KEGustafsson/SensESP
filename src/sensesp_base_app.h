@@ -57,9 +57,10 @@ class SensESPBaseApp {
   /**
    * @brief Clear all static object registries.
    *
-   * Empties the ConfigItem, SKEmitter, Transform, StatusPageItem and UIButton
-   * registries so a subsequent app start (or a test) begins from a clean
-   * slate. Called from destroy().
+   * Empties every static registry (ConfigItem, UIButton, SKEmitter, Transform,
+   * StatusPageItem, SKListener, SKPutListener) so a subsequent app start (or a
+   * test) begins from a clean slate. Called from destroy() only when the app is
+   * actually being torn down.
    */
   static void clear_registries();
 
@@ -73,8 +74,13 @@ class SensESPBaseApp {
       ESP_LOGW(__FILENAME__,
                "SensESPBaseApp instance has active references and won't be "
                "properly destroyed.");
+    } else {
+      // Only clear the registries when the app is actually being torn down.
+      // If outside references survive, the registered objects survive too, and
+      // clearing would strand live objects (they register only in their
+      // constructors, so they would never re-appear).
+      clear_registries();
     }
-    clear_registries();
     instance_ = nullptr;
     return !outside_users;
   }
