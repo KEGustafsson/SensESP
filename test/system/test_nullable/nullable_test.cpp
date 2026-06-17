@@ -9,7 +9,8 @@
  * sentinel (e.g. float -> -1e9, uint8_t -> 0xff). A value is "invalid" only
  * when it equals that sentinel. A default-constructed Nullable holds T{} (0),
  * which is therefore VALID for types whose sentinel differs from 0 (int,
- * float, uint8_t) and INVALID only for bool, whose sentinel is false.
+ * float, uint8_t). Nullable<bool> is unsupported and fails to compile (bool
+ * has no spare sentinel value); see #883.
  */
 
 #include <Arduino.h>
@@ -55,20 +56,6 @@ void test_nullable_default_float_is_valid_zero() {
   NullableFloat n;
   TEST_ASSERT_TRUE(n.is_valid());
   TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.0f, n.value());
-}
-
-void test_nullable_bool_sentinel_is_false() {
-  // bool's invalid sentinel is `false`, so a default/false Nullable<bool> is
-  // invalid and a value of `false` is indistinguishable from invalid.
-  NullableBool d;
-  TEST_ASSERT_FALSE(d.is_valid());
-
-  NullableBool t = true;
-  TEST_ASSERT_TRUE(t.is_valid());
-  TEST_ASSERT_TRUE(static_cast<bool>(t));
-
-  NullableBool f = false;
-  TEST_ASSERT_FALSE(f.is_valid());
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +127,6 @@ void setup() {
   RUN_TEST(test_nullable_invalid_sentinel_is_not_valid);
   RUN_TEST(test_nullable_value_is_valid);
   RUN_TEST(test_nullable_default_float_is_valid_zero);
-  RUN_TEST(test_nullable_bool_sentinel_is_false);
   RUN_TEST(test_nullable_ptr_mutates_value);
   RUN_TEST(test_nullable_copy_assignment);
   RUN_TEST(test_nullable_to_json_invalid_is_null);

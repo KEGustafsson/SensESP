@@ -36,8 +36,5 @@ uint64_t Nullable<uint64_t>::invalid_value_ = 0xffffffffffffffffLL;
 template <>
 int64_t Nullable<int64_t>::invalid_value_ = 0x7fffffffffffffffLL;
 
-template <>
-bool Nullable<bool>::invalid_value_ = false;
-
 
 }  // namespace sensesp

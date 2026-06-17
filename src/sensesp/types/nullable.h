@@ -1,6 +1,8 @@
 #ifndef SENSESP_SRC_SENSESP_TYPES_NULLABLE_H_
 #define SENSESP_SRC_SENSESP_TYPES_NULLABLE_H_
 
+#include <type_traits>
+
 #include "ArduinoJson.h"
 
 namespace sensesp {
@@ -13,9 +15,19 @@ namespace sensesp {
  * value is invalid only when it equals that sentinel. A default-constructed
  * Nullable holds T{} (0), so it is valid for types whose sentinel differs from
  * 0; use Nullable<T>::invalid() to obtain the invalid value explicitly.
+ *
+ * Nullable<bool> is intentionally unsupported: bool has only two values, so
+ * there is no spare bit pattern to reserve as an invalid sentinel without
+ * making one of `true`/`false` indistinguishable from "missing". Use a plain
+ * bool, or a wider type if you need a distinct invalid state.
  */
 template <typename T>
 class Nullable {
+  static_assert(
+      !std::is_same<T, bool>::value,
+      "Nullable<bool> is not supported: bool has no spare sentinel value. Use a "
+      "plain bool, or a wider type if a distinct invalid state is needed.");
+
   public:
     Nullable() : value_{} {}
     Nullable(T value) : value_{value} {}
@@ -55,7 +67,6 @@ class Nullable {
 typedef Nullable<int> NullableInt;
 typedef Nullable<float> NullableFloat;
 typedef Nullable<double> NullableDouble;
-typedef Nullable<bool> NullableBool;
 
 template <typename T>
 void convertFromJson(JsonVariantConst src, Nullable<T> &dst) {
