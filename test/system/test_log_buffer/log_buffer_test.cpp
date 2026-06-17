@@ -204,6 +204,75 @@ void test_session_id_stable_across_calls() {
 }
 
 // ---------------------------------------------------------------------------
+// ANSI escape stripping
+// ---------------------------------------------------------------------------
+
+void test_ansi_color_sequence_stripped() {
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "\033[0;32mINFO: ready\033[0m", 10);
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("INFO: ready", snap.lines[0].c_str());
+}
+
+void test_ansi_escape_only_line_dropped() {
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "\033[0;32m\033[0m", 10);  // color codes with no payload
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(0, snap.lines.size());
+  TEST_ASSERT_EQUAL(0, snap.next);  // empty after stripping does not advance
+}
+
+void test_ansi_lone_trailing_esc_removed() {
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "abc\033", 10);
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("abc", snap.lines[0].c_str());
+}
+
+void test_ansi_truncated_csi_consumed() {
+  // A CSI cut off before its final byte -- e.g. the upstream 256-byte capture
+  // split a color sequence -- is consumed to end of input, leaving no ESC.
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "abc\033[", 10);   // seq 0: bare CSI introducer
+  push(buf, "def\033[0", 10);  // seq 1: CSI with a parameter, no final byte
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(2, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("abc", snap.lines[0].c_str());
+  TEST_ASSERT_EQUAL_STRING("def", snap.lines[1].c_str());
+}
+
+void test_ansi_lone_esc_keeps_following_byte() {
+  // A bare ESC not followed by '[' drops only the ESC, not the next byte.
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "a\033Zb", 10);
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("aZb", snap.lines[0].c_str());
+}
+
+void test_ansi_literal_bracket_preserved() {
+  // A '[' not preceded by ESC is ordinary content (Signal K delta JSON is full
+  // of them) and must survive untouched.
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "[boot] values:[1,2]", 10);
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("[boot] values:[1,2]", snap.lines[0].c_str());
+}
+
+void test_ansi_no_esc_byte_survives() {
+  // The invariant that keeps /api/log valid JSON: no raw ESC (0x1b) is stored.
+  LogBuffer buf(200, 2000, 128);
+  push(buf, "\033[31mA\033[0mB\033[32mC\033[0m", 10);
+  LogSnapshot snap = buf.snapshot_since(0, false, 10);
+  TEST_ASSERT_EQUAL(1, snap.lines.size());
+  TEST_ASSERT_EQUAL_STRING("ABC", snap.lines[0].c_str());
+  TEST_ASSERT_TRUE(snap.lines[0].find('\x1b') == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // Test runner
 // ---------------------------------------------------------------------------
 
@@ -227,6 +296,14 @@ void setup() {
   RUN_TEST(test_post_reboot_stale_cursor_no_gap);
   RUN_TEST(test_prune_keeps_lines_when_now_before_timestamp);
   RUN_TEST(test_bare_newline_dropped);
+
+  RUN_TEST(test_ansi_color_sequence_stripped);
+  RUN_TEST(test_ansi_escape_only_line_dropped);
+  RUN_TEST(test_ansi_lone_trailing_esc_removed);
+  RUN_TEST(test_ansi_truncated_csi_consumed);
+  RUN_TEST(test_ansi_lone_esc_keeps_following_byte);
+  RUN_TEST(test_ansi_literal_bracket_preserved);
+  RUN_TEST(test_ansi_no_esc_byte_survives);
 
   RUN_TEST(test_session_id_stable_across_calls);
 

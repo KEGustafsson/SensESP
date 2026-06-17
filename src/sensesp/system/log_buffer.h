@@ -58,6 +58,9 @@ struct LogSnapshot {
  */
 class LogBuffer {
  public:
+  // max_line_length defaults to 256 to match the capture buffer in
+  // vprintf_trampoline(); a larger value cannot recover more than that buffer
+  // already captured.
   explicit LogBuffer(size_t max_lines = 200, uint32_t max_age_ms = 2000,
                      size_t max_line_length = 256);
 

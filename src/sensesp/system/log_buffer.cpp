@@ -54,6 +54,9 @@ int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
   // mutex, which is illegal in interrupt context. UART output already happened
   // above, so an ISR-context line is forwarded but not captured.
   if (inst != nullptr && !xPortInIsrContext()) {
+    // This buffer bounds the captured line length; LogBuffer's default
+    // max_line_length is sized to match it. Raising one without the other has
+    // no effect past the smaller of the two.
     char buf[256];
     va_list copy;
     va_copy(copy, args);
