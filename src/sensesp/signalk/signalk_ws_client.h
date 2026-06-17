@@ -89,7 +89,9 @@ class SKWSClient : public FileSystemSaveable,
   // SKWSClient task methods
 
   void on_disconnected();
-  void on_error();
+  // handshake_status is the HTTP status of a failed WebSocket upgrade (0 if not
+  // applicable); a 401 means the auth token was rejected.
+  void on_error(int handshake_status);
   void on_connected();
   void on_receive_delta(uint8_t* payload, size_t length);
   void on_receive_updates(JsonDocument& message);
@@ -295,7 +297,6 @@ class SKWSClient : public FileSystemSaveable,
   /////////////////////////////////////////////////////////
   // SKWSClient task methods
 
-  void test_token(const String host, const uint16_t port);
   void send_access_request(const String host, const uint16_t port);
   void poll_access_request(const String host, const uint16_t port,
                            const String href);
