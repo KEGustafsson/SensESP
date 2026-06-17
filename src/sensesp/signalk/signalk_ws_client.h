@@ -38,6 +38,19 @@ namespace sensesp {
 
 static const char* NULL_AUTH_TOKEN = "";
 
+// HTTP status returned on a WebSocket upgrade when the Signal K server rejects
+// the auth token.
+static constexpr int kHttpUnauthorized = 401;
+
+/**
+ * @brief Decide whether a failed WebSocket upgrade should clear the auth token.
+ *
+ * Only an authenticated (TLS) channel yields a trustworthy handshake status;
+ * over plaintext the status could be injected by an on-path attacker, so the
+ * token is never discarded based on it.
+ */
+bool should_clear_token_on_status(bool ssl_enabled, int handshake_status);
+
 enum class SKWSConnectionState {
   kSKWSDisconnected,
   kSKWSAuthorizing,
@@ -220,8 +233,6 @@ class SKWSClient : public FileSystemSaveable,
   String client_id_ = "";
   String polling_href_ = "";
   String auth_token_ = NULL_AUTH_TOKEN;
-  bool server_detected_ = false;
-  bool token_test_success_ = false;
 
   unsigned long next_attempt_ms_ = 0;
   unsigned long connect_interval_ms_ = 2000;
@@ -297,6 +308,13 @@ class SKWSClient : public FileSystemSaveable,
   /////////////////////////////////////////////////////////
   // SKWSClient task methods
 
+#ifndef SENSESP_SSL_SUPPORT
+  // Validate the auth token over plain HTTP before opening the WebSocket
+  // stream. Only used on non-SSL builds; SSL builds validate it on the upgrade
+  // itself (see connect()) to avoid a second TLS handshake that fragments the
+  // heap.
+  void test_token(const String host, const uint16_t port);
+#endif
   void send_access_request(const String host, const uint16_t port);
   void poll_access_request(const String host, const uint16_t port,
                            const String href);
