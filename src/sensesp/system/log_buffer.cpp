@@ -54,6 +54,9 @@ int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
   // mutex, which is illegal in interrupt context. UART output already happened
   // above, so an ISR-context line is forwarded but not captured.
   if (inst != nullptr && !xPortInIsrContext()) {
+    // This buffer bounds the captured line length; LogBuffer's default
+    // max_line_length is sized to match it. Raising one without the other has
+    // no effect past the smaller of the two.
     char buf[256];
     va_list copy;
     va_copy(copy, args);
@@ -69,6 +72,39 @@ int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
   return ret;
 }
 
+namespace {
+// Copy text with ANSI/VT100 escape sequences removed. ESP_LOG wraps each line
+// in color codes when CONFIG_LOG_COLORS is enabled; the raw ESC byte (0x1b) is
+// a control character that ArduinoJson does not escape, so it would otherwise
+// reach the /api/log response unescaped and make the JSON unparseable in the
+// browser. A CSI sequence is ESC '[' then parameter/intermediate bytes up to a
+// final byte in 0x40-0x7e; a lone ESC is simply dropped.
+std::string strip_ansi(const char* text, size_t length) {
+  std::string out;
+  out.reserve(length);
+  size_t i = 0;
+  while (i < length) {
+    if (text[i] == '\x1b') {
+      i++;  // drop ESC
+      if (i < length && text[i] == '[') {
+        i++;  // drop '['
+        while (i < length) {
+          unsigned char c = static_cast<unsigned char>(text[i]);
+          i++;
+          if (c >= 0x40 && c <= 0x7e) {
+            break;  // final byte, end of sequence
+          }
+        }
+      }
+      continue;
+    }
+    out.push_back(text[i]);
+    i++;
+  }
+  return out;
+}
+}  // namespace
+
 void LogBuffer::push_line(const char* text, size_t length, uint32_t now_ms) {
   // Strip trailing CR/LF so each record is one display line.
   while (length > 0 && (text[length - 1] == '\n' || text[length - 1] == '\r')) {
@@ -77,13 +113,20 @@ void LogBuffer::push_line(const char* text, size_t length, uint32_t now_ms) {
   if (length == 0) {
     return;
   }
-  if (length > max_line_length_) {
-    length = max_line_length_;
+
+  // Remove ANSI color escapes so the buffered copy served over /api/log is
+  // plain, JSON-safe text. The console output above keeps its colors.
+  std::string line = strip_ansi(text, length);
+  if (line.empty()) {
+    return;
+  }
+  if (line.size() > max_line_length_) {
+    line.resize(max_line_length_);
   }
 
   xSemaphoreTake(mutex_, portMAX_DELAY);
   prune_locked(now_ms);
-  records_.push_back({next_seq_, now_ms, std::string(text, length)});
+  records_.push_back({next_seq_, now_ms, std::move(line)});
   next_seq_++;
   // Enforce the count cap after inserting the new record.
   while (records_.size() > max_lines_) {
