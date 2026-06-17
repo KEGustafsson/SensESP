@@ -135,7 +135,17 @@ static void websocket_event_handler(void* handler_args,
       }
       break;
     case WEBSOCKET_EVENT_ERROR:
-      ws_client->on_error();
+      // The HTTP status of the failed upgrade (e.g. 401 for a rejected token)
+      // lets us distinguish a bad token from a transient transport error. The
+      // handshake status field only exists in the newer esp_websocket_client
+      // component pulled for SSL builds; the version bundled with the EOL
+      // espressif32 Arduino platform lacks it, so fall back to 0 (not
+      // applicable), matching how on_error() treats a transient failure.
+#ifdef SENSESP_SSL_SUPPORT
+      ws_client->on_error(data->error_handle.esp_ws_handshake_status_code);
+#else
+      ws_client->on_error(0);
+#endif
       break;
   }
 }
@@ -200,17 +210,7 @@ SKWSClient::SKWSClient(const String& config_path,
  *
  */
 void SKWSClient::on_disconnected() {
-  if (this->get_connection_state() == SKWSConnectionState::kSKWSConnecting &&
-      server_detected_ && !token_test_success_) {
-    // Going from connecting directly to disconnect when we
-    // know we have found and talked to the server usually means
-    // the authentication token is bad.
-    ESP_LOGW(__FILENAME__, "Bad access token detected. Setting token to null.");
-    auth_token_ = NULL_AUTH_TOKEN;
-    save();
-  }
   this->set_connection_state(SKWSConnectionState::kSKWSDisconnected);
-  server_detected_ = false;
 }
 
 /**
@@ -219,9 +219,27 @@ void SKWSClient::on_disconnected() {
  * Called in the websocket task context.
  *
  */
-void SKWSClient::on_error() {
+bool should_clear_token_on_status(bool ssl_enabled, int handshake_status) {
+  return ssl_enabled && handshake_status == kHttpUnauthorized;
+}
+
+void SKWSClient::on_error(int handshake_status) {
   this->set_connection_state(SKWSConnectionState::kSKWSDisconnected);
-  ESP_LOGW(__FILENAME__, "Websocket client error.");
+  if (should_clear_token_on_status(ssl_enabled_, handshake_status)) {
+    // The server rejected the token on the WebSocket upgrade (e.g. the server
+    // was reinstalled, or the device was moved to a different server). Clear it
+    // so the next reconnect requests fresh access, and shorten the backoff so
+    // re-authorization starts promptly instead of after the (possibly grown)
+    // reconnect interval. A non-401 error (transport, TLS, network) leaves the
+    // token intact and simply retries.
+    ESP_LOGW(__FILENAME__, "Token rejected (%d), requesting new access",
+             handshake_status);
+    auth_token_ = NULL_AUTH_TOKEN;
+    save();
+    reset_reconnect_interval();
+  } else {
+    ESP_LOGW(__FILENAME__, "Websocket client error.");
+  }
 }
 
 /**
@@ -731,18 +749,33 @@ void SKWSClient::connect() {
     return;
   }
 
-  // Test the validity of the authorization token
+  // A token is already present. Validate it before streaming.
+#ifdef SENSESP_SSL_SUPPORT
+  // Connect the WebSocket directly rather than first probing the token over a
+  // separate HTTPS request: on memory-constrained targets (e.g. ESP32-C3) the
+  // back-to-back token-probe TLS handshake and the WebSocket TLS handshake
+  // fragment the heap, and the second fails to allocate
+  // (MBEDTLS_ERR_SSL_ALLOC_FAILED). The server validates the token on the
+  // upgrade itself; a 401 there is handled in on_error() (clears the token and
+  // re-requests access on the next reconnect).
+  this->connect_ws(this->server_address_, this->server_port_);
+#else
+  // The bundled (non-SSL) esp_websocket_client reports no upgrade status, so
+  // on_error() cannot tell a rejected token from a transient failure. Probe the
+  // token over plain HTTP first -- there is no TLS handshake to fragment the
+  // heap. A 401 there clears the token and re-requests access.
   this->test_token(this->server_address_, this->server_port_);
+#endif
 }
 
 void SKWSClient::loop() {
   // No-op: esp_websocket_client handles data via event callbacks
 }
 
+#ifndef SENSESP_SSL_SUPPORT
 void SKWSClient::test_token(const String server_address,
                             const uint16_t server_port) {
-  String protocol = ssl_enabled_ ? "https://" : "http://";
-  String url = protocol + server_address + ":" + server_port +
+  String url = String("http://") + server_address + ":" + server_port +
                "/signalk/v1/stream";
   ESP_LOGD(__FILENAME__, "Testing token with url %s", url.c_str());
 
@@ -752,12 +785,6 @@ void SKWSClient::test_token(const String server_address,
   esp_http_client_config_t config = {};
   config.url = url.c_str();
   config.timeout_ms = 10000;
-#ifdef SENSESP_SSL_SUPPORT
-  if (ssl_enabled_) {
-    config.crt_bundle_attach = tofu_crt_bundle_attach;
-    config.skip_cert_common_name_check = true;
-  }
-#endif
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   if (client == nullptr) {
@@ -771,7 +798,8 @@ void SKWSClient::test_token(const String server_address,
   // Use streaming API for GET request
   esp_err_t err = esp_http_client_open(client, 0);
   if (err != ESP_OK) {
-    ESP_LOGE(__FILENAME__, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+    ESP_LOGE(__FILENAME__, "Failed to open HTTP connection: %s",
+             esp_err_to_name(err));
     esp_http_client_cleanup(client);
     set_connection_state(SKWSConnectionState::kSKWSDisconnected);
     return;
@@ -794,7 +822,8 @@ void SKWSClient::test_token(const String server_address,
     // Chunked encoding or unknown/large content length - read in chunks
     char buffer[512];
     int read_len;
-    while ((read_len = esp_http_client_read(client, buffer, sizeof(buffer) - 1)) > 0) {
+    while ((read_len = esp_http_client_read(client, buffer,
+                                            sizeof(buffer) - 1)) > 0) {
       buffer[read_len] = '\0';
       payload += String(buffer);
       if (payload.length() > 4096) break;
@@ -805,20 +834,18 @@ void SKWSClient::test_token(const String server_address,
   esp_http_client_cleanup(client);
 
   if (payload.length() > 0) {
-    ESP_LOGD(__FILENAME__, "Returned payload (%d bytes): %s",
-             payload.length(), payload.c_str());
+    ESP_LOGD(__FILENAME__, "Returned payload (%d bytes): %s", payload.length(),
+             payload.c_str());
   }
 
   if (http_code == 426) {
-    // HTTP status 426 is "Upgrade Required", which is the expected
-    // response for a websocket connection.
+    // HTTP status 426 is "Upgrade Required", the expected response for a
+    // websocket endpoint reached over plain HTTP: the token is valid.
     ESP_LOGD(__FILENAME__, "Attempting to connect to Signal K Websocket...");
-    server_detected_ = true;
-    token_test_success_ = true;
     this->connect_ws(server_address, server_port);
-  } else if (http_code == 401) {
-    // Token is invalid/expired - clear it and request new access
-    // Keep client_id_ so we reuse the same device identity
+  } else if (http_code == kHttpUnauthorized) {
+    // Token is invalid/expired - clear it and request new access.
+    // Keep client_id_ so we reuse the same device identity.
     ESP_LOGW(__FILENAME__, "Token rejected (401), requesting new access");
     this->auth_token_ = NULL_AUTH_TOKEN;
     this->save();
@@ -830,6 +857,7 @@ void SKWSClient::test_token(const String server_address,
     set_connection_state(SKWSConnectionState::kSKWSDisconnected);
   }
 }
+#endif  // !SENSESP_SSL_SUPPORT
 
 void SKWSClient::send_access_request(const String server_address,
                                      const uint16_t server_port) {
