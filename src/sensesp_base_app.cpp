@@ -1,6 +1,8 @@
 #include "sensesp_base_app.h"
 
 #include "sensesp/signalk/signalk_emitter.h"
+#include "sensesp/signalk/signalk_listener.h"
+#include "sensesp/signalk/signalk_put_request_listener.h"
 #include "sensesp/transforms/transform.h"
 #include "sensesp/ui/config_item.h"
 #include "sensesp/ui/status_page_item.h"
@@ -19,6 +21,8 @@ void SensESPBaseApp::clear_registries() {
   SKEmitter::clear_registry();
   TransformBase::clear_registry();
   StatusPageItemBase::clear_registry();
+  SKListener::clear_registry();
+  SKPutListener::clear_registry();
 }
 
 }  // namespace sensesp

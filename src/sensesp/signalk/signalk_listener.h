@@ -36,6 +36,13 @@ class SKListener : virtual public Observable, public FileSystemSaveable {
              const String& config_path = "");
 
   /**
+   * Unregisters this listener from the static registry so the registry never
+   * holds a dangling pointer. Takes the listener semaphore because the WS
+   * client task iterates the registry under the same lock.
+   */
+  virtual ~SKListener();
+
+  /**
    * Returns the current Signal K path. An empty string
    * is returned if this particular source is not configured
    * or intended to return actual data.
@@ -65,6 +72,12 @@ class SKListener : virtual public Observable, public FileSystemSaveable {
   virtual void parse_meta(const std::shared_ptr<const JsonDocument>& meta_doc) {}
 
   static const std::vector<SKListener*>& get_listeners() { return listeners_; }
+
+  /**
+   * Empties the listener registry. Intended for clean app restart and test
+   * isolation; not for normal runtime use. Takes the listener semaphore.
+   */
+  static void clear_registry();
 
   static bool take_semaphore(uint64_t timeout_ms = 0);
   static void release_semaphore();
