@@ -136,6 +136,7 @@ void WiFiProvisioner::start_client_autoconnect() {
   auto reconnect_cb = [this]() {
     static uint32_t attempt_num = 0;
     static uint32_t current_config_idx = 0;
+    static int last_applied_idx = -1;
 
     int num_configs = client_settings_.size();
 
@@ -194,7 +195,19 @@ void WiFiProvisioner::start_client_autoconnect() {
       WiFi.config(config.ip_, config.gateway_, config.netmask_,
                   config.dns_server_);
     }
+    // The ESP32 STA rejects a new config (ESP_ERR_WIFI_STATE, "sta is
+    // connecting, cannot set config") while it is still connecting or
+    // auto-reconnecting to the previous SSID, so switching networks needs the
+    // in-progress attempt dropped first. Only disconnect when the target config
+    // actually changes; re-applying the same config (a single network, or a
+    // list with one valid slot) must leave a slow association running rather
+    // than restart it every cycle.
+    int applied_idx = static_cast<int>(current_config_idx % num_configs);
+    if (applied_idx != last_applied_idx) {
+      WiFi.disconnect(false);
+    }
     WiFi.begin(config.ssid_.c_str(), config.password_.c_str());
+    last_applied_idx = applied_idx;
     attempt_num++;
     current_config_idx++;  // Move to the next config for the next attempt
   };
@@ -203,8 +216,9 @@ void WiFiProvisioner::start_client_autoconnect() {
   reconnect_cb();
 
   // Launch a separate onRepeat event to (re-)establish WiFi connection.
-  // Connecting is attempted only every 20 s to allow the previous connection
-  // attempt to complete even if the network is slow.
+  // Attempts are spaced 20 s apart: when staying on the same network this lets
+  // a slow association finish; when failing over it bounds how long a missing
+  // network is tried before the next configured AP.
   event_loop()->onRepeat(20000, reconnect_cb);
 }
 
