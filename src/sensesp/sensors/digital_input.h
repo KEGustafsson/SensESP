@@ -180,7 +180,17 @@ class DigitalInputDebounceCounter : public DigitalInputCounter {
                               String config_path = "")
       : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
                             config_path, [this]() { this->handleInterrupt(); }),
-        ignore_interval_ms_{ignore_interval_ms} {}
+        ignore_interval_ms_{ignore_interval_ms} {
+    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
+      noInterrupts();
+      output_ = counter_;
+      counter_ = 0;
+      interrupts();
+      notify();
+    });
+    isr_event_ = event_loop()->onInterrupt(
+        pin_, interrupt_type, [this]() { this->handleInterrupt(); });
+  }
 
  private:
   void handleInterrupt();
