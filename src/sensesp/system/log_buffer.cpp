@@ -28,20 +28,123 @@ LogBuffer::LogBuffer(size_t max_lines, uint32_t max_age_ms,
 }
 
 void LogBuffer::install() {
+  // Idempotent: a second call would set previous_vprintf_ to the trampoline
+  // itself (esp_log_set_vprintf returns the currently installed handler),
+  // turning the fallback paths into unbounded recursion. After the first
+  // install previous_vprintf_ is the (always non-null) prior handler.
+  if (previous_vprintf_ != nullptr) {
+    return;
+  }
+
   // Draw the per-boot session id here rather than in the constructor: the hook
   // is installed during setup(), past early static init, and mixing in the boot
   // timer makes a repeated value across reboots unlikely even before the RF
   // subsystem seeds the RNG. The client also falls back to a cursor reset.
   session_id_ = esp_random() ^ static_cast<uint32_t>(esp_timer_get_time());
+
+  // Stand up the handoff queue and capture task before the hook goes live, so
+  // the first captured line already has somewhere to go. If the task can't be
+  // created, drop the queue too: a non-null queue with no drainer would fill
+  // after kLogCaptureQueueDepth lines and silently lose all capture for the
+  // rest of the uptime. Leaving capture_queue_ null makes the trampoline fall
+  // back to the chained handler (console preserved, capture disabled).
+  capture_queue_ = xQueueCreate(kLogCaptureQueueDepth, sizeof(LogQueueItem));
+  if (capture_queue_ != nullptr &&
+      xTaskCreate(&LogBuffer::capture_task, "LogCapture",
+                  kLogCaptureTaskStackSize, this, kLogCaptureTaskPriority,
+                  nullptr) != pdPASS) {
+    vQueueDelete(capture_queue_);
+    capture_queue_ = nullptr;
+  }
+
   instance_ = this;
   previous_vprintf_ = esp_log_set_vprintf(&LogBuffer::vprintf_trampoline);
+}
+
+void LogBuffer::enqueue_capture(LogQueueItem& item, int n) {
+  // Drop empty/error results; push_line would discard them anyway.
+  if (n <= 0) {
+    return;
+  }
+  item.length = (static_cast<size_t>(n) < sizeof(item.text))
+                    ? static_cast<uint16_t>(n)
+                    : static_cast<uint16_t>(sizeof(item.text) - 1);
+  item.timestamp_ms = esp_log_timestamp();
+  // Non-blocking: drop the line rather than stall the logger if the capture
+  // task is behind.
+  xQueueSend(capture_queue_, &item, 0);
+}
+
+void LogBuffer::capture_task(void* arg) {
+  auto* self = static_cast<LogBuffer*>(arg);
+  LogQueueItem item;
+  while (true) {
+    if (xQueueReceive(self->capture_queue_, &item, portMAX_DELAY) == pdTRUE) {
+      // The heap-allocating work (ANSI strip, std::string, deque) happens here,
+      // on this task's stack, not the logging task's.
+      self->push_line(item.text, item.length, item.timestamp_ms);
+    }
+  }
 }
 
 int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
   LogBuffer* inst = instance_;
 
-  // Forward to the previously installed handler so UART output is unchanged.
-  // A va_list can be traversed only once, so each consumer gets its own copy.
+#if !defined(ESP_LOG_VERSION) || ESP_LOG_VERSION == 1
+  // ESP-IDF log V1: the hook is called once per line with the complete format
+  // string and va_list, so a single vsnprintf reproduces the exact console
+  // bytes. We format ONCE on the caller stack, emit the bytes ourselves, and
+  // hand the same buffer to the capture task -- avoiding the chained handler's
+  // second full format pass (newlib vfprintf), which is the dominant stack cost
+  // and what overflows small logging tasks.
+  //
+  // ISR / pre-install context: stdio and the capture queue are unsafe, so fall
+  // back to the chained handler (a full vfprintf). Rare path.
+  if (inst == nullptr || inst->capture_queue_ == nullptr ||
+      xPortInIsrContext()) {
+    if (inst != nullptr && inst->previous_vprintf_ != nullptr) {
+      return inst->previous_vprintf_(format, args);
+    }
+    return 0;
+  }
+
+  LogQueueItem item;
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int n = vsnprintf(item.text, sizeof(item.text), format, args);
+  if (n < 0) {
+    va_end(args_copy);
+    return n;
+  }
+
+  int ret = n;
+  if (static_cast<size_t>(n) >= sizeof(item.text)) {
+    // The line is longer than our buffer. Self-emitting the truncated copy
+    // would drop the trailing newline and run console lines together, so emit
+    // the full line via the chained handler -- a second format pass. This
+    // re-incurs the caller-stack cost the lean path avoids, so it relies on
+    // over-length lines coming from roomy-stack loggers; the small-stack tasks
+    // this protects log short lines and never reach here.
+    if (inst->previous_vprintf_ != nullptr) {
+      ret = inst->previous_vprintf_(format, args_copy);
+    }
+  } else {
+    // Fits: format once, emit the bytes ourselves through stdout (not a fixed
+    // peripheral) so output follows the active console -- UART and
+    // USB-CDC/JTAG alike. newlib FILE locking serializes concurrent writers,
+    // as it did for the chained vfprintf.
+    fwrite(item.text, 1, static_cast<size_t>(n), stdout);
+  }
+  va_end(args_copy);
+
+  // Hand the (possibly truncated) line to the capture task; the heap work
+  // runs on its stack, not the caller's.
+  inst->enqueue_capture(item, n);
+  return ret;
+#else
+  // ESP-IDF log V2 calls the hook multiple times per line with fragments, so a
+  // single format-and-emit would mangle output. Fall back to chaining the
+  // previous handler for console output and a second format for capture.
   int ret = 0;
   if (inst != nullptr && inst->previous_vprintf_ != nullptr) {
     va_list copy;
@@ -49,27 +152,17 @@ int LogBuffer::vprintf_trampoline(const char* format, va_list args) {
     ret = inst->previous_vprintf_(format, copy);
     va_end(copy);
   }
-
-  // Capture into the buffer, but never from an ISR: push_line takes a blocking
-  // mutex, which is illegal in interrupt context. UART output already happened
-  // above, so an ISR-context line is forwarded but not captured.
-  if (inst != nullptr && !xPortInIsrContext()) {
-    // This buffer bounds the captured line length; LogBuffer's default
-    // max_line_length is sized to match it. Raising one without the other has
-    // no effect past the smaller of the two.
-    char buf[256];
+  if (inst != nullptr && inst->capture_queue_ != nullptr &&
+      !xPortInIsrContext()) {
+    LogQueueItem item;
     va_list copy;
     va_copy(copy, args);
-    int n = vsnprintf(buf, sizeof(buf), format, copy);
+    int n = vsnprintf(item.text, sizeof(item.text), format, copy);
     va_end(copy);
-    if (n > 0) {
-      size_t length =
-          (static_cast<size_t>(n) < sizeof(buf)) ? n : sizeof(buf) - 1;
-      inst->push_line(buf, length, esp_log_timestamp());
-    }
+    inst->enqueue_capture(item, n);
   }
-
   return ret;
+#endif
 }
 
 namespace {
