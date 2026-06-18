@@ -126,15 +126,26 @@ class DigitalInputCounter : public DigitalInput, public Sensor<int> {
   virtual bool from_json(const JsonObject& config) override;
 
  protected:
+  enum class LoadConfig { kNo, kYes };
+
   DigitalInputCounter(uint8_t pin, int pin_mode, int interrupt_type,
                       unsigned int read_delay, String config_path,
                       std::function<void()> interrupt_handler)
+      : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
+                            config_path, interrupt_handler, LoadConfig::kYes) {}
+
+  DigitalInputCounter(uint8_t pin, int pin_mode, int interrupt_type,
+                      unsigned int read_delay, String config_path,
+                      std::function<void()> interrupt_handler,
+                      LoadConfig load_config)
       : DigitalInput{pin, pin_mode},
         Sensor<int>(config_path),
         read_delay_{read_delay},
         interrupt_type_{interrupt_type},
         interrupt_handler_{interrupt_handler} {
-    load();
+    if (load_config == LoadConfig::kYes) {
+      load();
+    }
   }
 
   unsigned int read_delay_;
@@ -179,8 +190,10 @@ class DigitalInputDebounceCounter : public DigitalInputCounter {
                               unsigned int ignore_interval_ms,
                               String config_path = "")
       : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
-                            config_path, [this]() { this->handleInterrupt(); }),
+                            config_path, [this]() { this->handleInterrupt(); },
+                            LoadConfig::kNo),
         ignore_interval_ms_{ignore_interval_ms} {
+    load();
     repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
       noInterrupts();
       output_ = counter_;
