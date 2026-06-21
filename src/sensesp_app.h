@@ -21,6 +21,7 @@
 #include "sensesp/signalk/signalk_ws_client.h"
 #include "sensesp/system/button.h"
 #include "sensesp/system/log_buffer.h"
+#include "sensesp/system/reset_info.h"
 #include "sensesp/system/system_status_led.h"
 #include "sensesp/ui/status_page_item.h"
 #include "sensesp_base_app.h"
@@ -349,6 +350,13 @@ class SensESPApp : public SensESPBaseApp {
 
   // Collect metrics for the status page
   void connect_status_page_items() {
+    // Reset cause and the previous boot's heap watermark are fixed for this
+    // session; capture them once here.
+    begin_reset_info();
+    reset_reason_ui_output_.set(String(reset_reason_str()));
+    min_free_before_reset_ui_output_.set(
+        static_cast<int>(min_free_heap_before_reset()));
+
     this->hostname_->connect_to(&this->hostname_ui_output_);
     this->event_loop_->onRepeat(4999, [this]() {
       // WiFi-specific status: only populated when WiFi is the active
@@ -363,6 +371,10 @@ class SensESPApp : public SensESPBaseApp {
       }
       mac_address_ui_output_.set(network_provisioner_->mac_address());
       free_memory_ui_output_.set(ESP.getFreeHeap());
+      min_free_memory_ui_output_.set(ESP.getMinFreeHeap());
+      // Carry this boot's heap low-water mark into RTC memory so it survives a
+      // crash and reports as "min free before last reset" on the next boot.
+      update_min_free_heap_watermark();
 
       // Uptime
       uptime_ui_output_.set(millis() / 1000);
@@ -466,6 +478,13 @@ class SensESPApp : public SensESPBaseApp {
   StatusPageItem<int> free_memory_ui_output_{"Free memory (bytes)", 0, "System",
                                              1000};
   StatusPageItem<int> uptime_ui_output_{"Uptime (s)", 0, "System", 1100};
+
+  StatusPageItem<int> min_free_memory_ui_output_{"Min free memory (bytes)", 0,
+                                                 "System", 1010};
+  StatusPageItem<int> min_free_before_reset_ui_output_{
+      "Min free memory before last reset (bytes)", 0, "System", 1020};
+  StatusPageItem<String> reset_reason_ui_output_{"Last reset reason", "",
+                                                 "System", 1030};
 
   StatusPageItem<String> hostname_ui_output_{"Hostname", "", "Network", 1200};
   StatusPageItem<String> mac_address_ui_output_{"MAC Address", "", "Network",
