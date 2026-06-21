@@ -67,9 +67,9 @@ void setup() {
   // When disabled:
   // - All certificates are accepted without verification (less secure)
   //
-  // To reset a stored fingerprint (e.g., after server cert renewal):
+  // To reset the stored trust anchor (e.g., after the server's CA changed):
   // - Use the web UI: Settings -> Signal K -> SSL/TLS Security -> Reset TOFU
-  // - Or call: ws_client->reset_tofu_fingerprint()
+  // - Or call: ws_client->reset_tofu()
   ws_client->set_tofu_enabled(true);
 
   // Create a simple sensor to demonstrate the connection is working.

@@ -75,6 +75,16 @@ class SystemStatusController : public ValueProducer<SystemStatus> {
       case SKWSConnectionState::kSKWSConnected:
         this->update_state(SystemStatus::kSKWSConnected);
         break;
+      case SKWSConnectionState::kSKWSCertificateError:
+        // No distinct status-LED pattern: treat like a disconnect for the LED.
+        // The certificate-specific message is surfaced on the web Status page
+        // via get_connection_status().
+        if (current_state_ != SystemStatus::kWifiDisconnected &&
+            current_state_ != SystemStatus::kWifiNoAP &&
+            current_state_ != SystemStatus::kWifiManagerActivated) {
+          this->update_state(SystemStatus::kSKWSDisconnected);
+        }
+        break;
     }
   }
 

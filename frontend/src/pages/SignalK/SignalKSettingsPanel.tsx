@@ -259,11 +259,17 @@ function SKSSLSettings({
     setResetting(false);
   }
 
-  const hasFingerprint =
-    config.tofu_fingerprint && config.tofu_fingerprint !== "";
-  const fingerprintDisplay = hasFingerprint
-    ? String(config.tofu_fingerprint).substring(0, 16) + "..."
-    : "Not stored";
+  const pinnedCn = config.tofu_pin_cn ? String(config.tofu_pin_cn) : "";
+  const pinnedIsCa = config.tofu_pin_is_ca === true;
+  // Fall back to the legacy leaf fingerprint for configs saved before CA pinning.
+  const legacyFingerprint =
+    config.tofu_fingerprint && config.tofu_fingerprint !== ""
+      ? String(config.tofu_fingerprint).substring(0, 16) + "..."
+      : "";
+  const hasPin = pinnedCn !== "" || legacyFingerprint !== "";
+  const pinnedDisplay = pinnedCn
+    ? `${pinnedCn} (${pinnedIsCa ? "CA" : "leaf"})`
+    : legacyFingerprint || "Not stored";
 
   return (
     <Card title="SSL/TLS Security">
@@ -299,32 +305,35 @@ function SKSSLSettings({
               Verify Server Certificate (TOFU)
             </label>
             <div className="form-text">
-              When enabled, the server certificate fingerprint is captured on
-              first connection and verified on subsequent connections.
+              When enabled, the server's issuing CA (or the leaf certificate if
+              the server presents no CA) is captured on first connection and
+              verified on subsequent connections.
             </div>
           </div>
 
           {config.ssl_enabled && (
             <div className="mb-3">
-              <label className="form-label">Stored Fingerprint</label>
+              <label className="form-label">Pinned Certificate</label>
               <div className="input-group">
                 <input
                   type="text"
                   className="form-control"
-                  value={fingerprintDisplay}
+                  value={pinnedDisplay}
                   disabled
                 />
                 <button
                   className="btn btn-outline-danger"
                   type="button"
                   onClick={handleResetTOFU}
-                  disabled={!hasFingerprint || resetting}
+                  disabled={!hasPin || resetting}
                 >
                   {resetting ? "Resetting..." : "Reset TOFU"}
                 </button>
               </div>
               <div className="form-text">
-                Reset if the server certificate has changed legitimately.
+                {pinnedCn && !pinnedIsCa
+                  ? "The server is not presenting its CA, so its leaf certificate is pinned and will need re-pinning when it rotates. Reset if the certificate changed legitimately."
+                  : "The issuing CA is pinned, so the connection survives leaf-certificate rotation. Reset if the server's CA changed legitimately."}
               </div>
             </div>
           )}
