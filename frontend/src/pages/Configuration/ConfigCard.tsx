@@ -238,7 +238,6 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
   const [componentRequiresRestart, setComponentRequiresRestart] =
     useState<boolean>(false);
   const [phase, setPhase] = useState<LoadPhase>("loading");
-  const [loadErrorText, setLoadErrorText] = useState<string>("");
   const [reloadToken, setReloadToken] = useState<number>(0);
 
   const id = useId();
@@ -246,7 +245,6 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
   useEffect(() => {
     const controller = new AbortController();
     setPhase("loading");
-    setLoadErrorText("");
 
     fetchConfigData(path, controller.signal)
       .then((data: ConfigData) => {
@@ -260,7 +258,7 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
       .catch((e: Error) => {
         // A cancelled request (unmount, path change, retry) is not a failure.
         if (isAbortError(e)) return;
-        setLoadErrorText(e.message);
+        console.warn(`Failed to load configuration "${path}"`, e);
         setPhase("failed");
       });
 
@@ -328,7 +326,9 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
       >
         <div role="alert">
           <p className="text-danger mb-1">Couldn't load this setting.</p>
-          <p className="text-body-secondary small">{loadErrorText}</p>
+          <p className="text-body-secondary small">
+            The device may be busy or temporarily unreachable.
+          </p>
         </div>
         <button
           className="btn btn-outline-secondary btn-sm"

@@ -6,28 +6,32 @@ import { ConfigCard } from "./ConfigCard";
 
 export function ConfigCards(): JSX.Element {
   const [cards, setCards] = useState<string[] | null>(null);
-  const [errorText, setErrorText] = useState<string>("");
+  const [failed, setFailed] = useState<boolean>(false);
   const [reloadToken, setReloadToken] = useState<number>(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    setErrorText("");
+    setFailed(false);
 
     fetchConfigPaths(controller.signal)
       .then((items) => setCards(items))
       .catch((e: Error) => {
         if (isAbortError(e)) return;
-        setErrorText(e.message);
+        console.warn("Failed to load the configuration card list", e);
+        setFailed(true);
       });
 
     return () => controller.abort();
   }, [reloadToken]);
 
-  if (errorText !== "") {
+  if (failed) {
     return (
       <div className="alert alert-danger m-3" role="alert">
         <p className="mb-1">Couldn't reach the device to load its settings.</p>
-        <p className="mb-2 small">{errorText}</p>
+        <p className="mb-2 small">
+          Make sure it's powered on and connected to the network, then try
+          again.
+        </p>
         <button
           className="btn btn-outline-secondary btn-sm"
           type="button"
