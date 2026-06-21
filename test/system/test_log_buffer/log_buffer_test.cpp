@@ -9,6 +9,7 @@
 
 #include <Arduino.h>
 
+#include <cstdint>
 #include <string>
 
 #include "sensesp/system/log_buffer.h"
@@ -191,6 +192,24 @@ void test_bare_newline_dropped() {
 }
 
 // ---------------------------------------------------------------------------
+// Memory-pressure backoff
+// ---------------------------------------------------------------------------
+
+void test_drops_line_under_heap_pressure() {
+  // With a headroom threshold larger than any achievable largest-free-block, the
+  // capture path must drop the line rather than attempt the std::string/deque
+  // allocation that would throw std::bad_alloc -> abort() under real exhaustion.
+  // Dropped lines leave the buffer and the sequence counter untouched.
+  LogBuffer buf(200, 2000, 128, /*min_headroom_bytes=*/SIZE_MAX);
+  push(buf, "should be dropped", 10);
+
+  TEST_ASSERT_EQUAL(0, buf.size());
+  LogSnapshot snap = buf.snapshot_since(0, /*has_since=*/false, 10);
+  TEST_ASSERT_EQUAL(0, snap.lines.size());
+  TEST_ASSERT_EQUAL(0, snap.next);
+}
+
+// ---------------------------------------------------------------------------
 // Session id
 // ---------------------------------------------------------------------------
 
@@ -296,6 +315,8 @@ void setup() {
   RUN_TEST(test_post_reboot_stale_cursor_no_gap);
   RUN_TEST(test_prune_keeps_lines_when_now_before_timestamp);
   RUN_TEST(test_bare_newline_dropped);
+
+  RUN_TEST(test_drops_line_under_heap_pressure);
 
   RUN_TEST(test_ansi_color_sequence_stripped);
   RUN_TEST(test_ansi_escape_only_line_dropped);
