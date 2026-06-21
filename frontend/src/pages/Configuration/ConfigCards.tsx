@@ -7,9 +7,11 @@ import { ConfigCard } from "./ConfigCard";
 export function ConfigCards(): JSX.Element {
   const [cards, setCards] = useState<string[] | null>(null);
   const [errorText, setErrorText] = useState<string>("");
+  const [reloadToken, setReloadToken] = useState<number>(0);
 
   useEffect(() => {
     const controller = new AbortController();
+    setErrorText("");
 
     fetchConfigPaths(controller.signal)
       .then((items) => setCards(items))
@@ -19,13 +21,20 @@ export function ConfigCards(): JSX.Element {
       });
 
     return () => controller.abort();
-  }, []);
+  }, [reloadToken]);
 
   if (errorText !== "") {
     return (
       <div className="alert alert-danger m-3" role="alert">
-        <p className="mb-0">Couldn't reach the device to load its settings.</p>
-        <p className="mb-0 small">{errorText}</p>
+        <p className="mb-1">Couldn't reach the device to load its settings.</p>
+        <p className="mb-2 small">{errorText}</p>
+        <button
+          className="btn btn-outline-secondary btn-sm"
+          type="button"
+          onClick={() => setReloadToken((token) => token + 1)}
+        >
+          Retry
+        </button>
       </div>
     );
   }

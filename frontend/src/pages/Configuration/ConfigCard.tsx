@@ -326,8 +326,10 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
         loading={false}
         title={title || path}
       >
-        <p className="text-danger mb-1">Couldn't load this setting.</p>
-        <p className="text-body-secondary small">{loadErrorText}</p>
+        <div role="alert">
+          <p className="text-danger mb-1">Couldn't load this setting.</p>
+          <p className="text-body-secondary small">{loadErrorText}</p>
+        </div>
         <button
           className="btn btn-outline-secondary btn-sm"
           type="button"

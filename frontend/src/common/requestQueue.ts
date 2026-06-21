@@ -75,7 +75,11 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
  * Jitter de-synchronizes retries so a burst that failed together does not
  * retry together and re-saturate the device.
  */
-function backoffMs(attempt: number, baseMs: number, maxMs: number): number {
+export function backoffMs(
+  attempt: number,
+  baseMs: number,
+  maxMs: number,
+): number {
   const ceiling = Math.min(maxMs, baseMs * 2 ** (attempt - 1));
   return Math.random() * ceiling;
 }
@@ -138,7 +142,11 @@ export function createRequestQueue(
     for (;;) {
       if (signal?.aborted) throw abortError();
       try {
-        return await task(signal);
+        const result = await task(signal);
+        // A task can resolve in the same tick the signal fires; treat a
+        // post-resolution abort as a cancellation so the caller ignores it.
+        if (signal?.aborted) throw abortError();
+        return result;
       } catch (error) {
         if (isAbortError(error)) throw error;
         attempt++;
