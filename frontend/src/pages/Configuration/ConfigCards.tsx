@@ -1,35 +1,34 @@
-import { APP_CONFIG } from "config";
+import { fetchConfigPaths } from "common/configAPIClient";
+import { isAbortError } from "common/requestQueue";
 import { type JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { ConfigCard } from "./ConfigCard";
 
-const updateCards = async (): Promise<string[]> => {
-  try {
-    const response = await fetch(APP_CONFIG.config_path + "?cards");
-    if (!response.ok) {
-      throw new Error(`HTTP Error ${response.status} ${response.statusText}`);
-    }
-    const data = await response.json();
-
-    const items = data;  // Should be an array of strings
-    return items;
-  } catch (e) {
-    console.log("Error getting config data from server", e);
-  }
-  return [];
-};
-
 export function ConfigCards(): JSX.Element {
   const [cards, setCards] = useState<string[] | null>(null);
-
-  async function updateFunc(): Promise<void> {
-    const items = await updateCards();
-    setCards(items);
-  }
+  const [errorText, setErrorText] = useState<string>("");
 
   useEffect(() => {
-    void updateFunc();
+    const controller = new AbortController();
+
+    fetchConfigPaths(controller.signal)
+      .then((items) => setCards(items))
+      .catch((e: Error) => {
+        if (isAbortError(e)) return;
+        setErrorText(e.message);
+      });
+
+    return () => controller.abort();
   }, []);
+
+  if (errorText !== "") {
+    return (
+      <div className="alert alert-danger m-3" role="alert">
+        <p className="mb-0">Couldn't reach the device to load its settings.</p>
+        <p className="mb-0 small">{errorText}</p>
+      </div>
+    );
+  }
 
   if (cards === null) {
     // Display a spinner while waiting for data. Center the spinner

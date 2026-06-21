@@ -1,11 +1,13 @@
 import { APP_CONFIG } from "config";
 import { useContext, useEffect, useId, useState } from "preact/hooks";
 
+import { fetchConfigData, type ConfigData } from "common/configAPIClient";
+import { JsonValue, type JsonObject } from "common/jsonTypes";
+import { isAbortError } from "common/requestQueue";
 import {
   RestartRequiredContext,
   RestartRequiredContextProps,
 } from "common/RestartRequiredContext";
-import { JsonValue, type JsonObject } from "common/jsonTypes";
 import { Card } from "components/Card";
 import {
   FormCheckboxInput,
@@ -218,6 +220,8 @@ interface ConfigCardProps {
   path: string;
 }
 
+type LoadPhase = "loading" | "loaded" | "failed";
+
 export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
   const { setRestartRequired } = useContext<RestartRequiredContextProps>(
     RestartRequiredContext,
@@ -233,36 +237,35 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
   const [isValid, setIsValid] = useState<boolean>(true);
   const [componentRequiresRestart, setComponentRequiresRestart] =
     useState<boolean>(false);
+  const [phase, setPhase] = useState<LoadPhase>("loading");
+  const [loadErrorText, setLoadErrorText] = useState<string>("");
+  const [reloadToken, setReloadToken] = useState<number>(0);
 
   const id = useId();
 
-  const updateFunc = async (path: string): Promise<void> => {
-    const response = await fetch(APP_CONFIG.config_path + path);
-    if (!response.ok) {
-      console.log(`HTTP Error ${response.status} ${response.statusText}`);
-      setHttpErrorText(
-        `Received error ${response.status} ${response.statusText} when ` +
-          `fetching the configuration: ${await response.text()}`,
-      );
-      return;
-    }
-    const data = await response.json();
-    console.log("Fetched config data", data);
-
-    setConfig(data.config);
-    setSchema(data.schema);
-    setTitle(data.title);
-    setDescription(data.description);
-    setComponentRequiresRestart(data.requires_restart);
-  };
-
   useEffect(() => {
-    if (Object.keys(config)?.length === 0) {
-      console.log(`Fetching config data from ${path}...`);
-      void updateFunc(path);
-      console.log(`Fetched config data from ${path}`);
-    }
-  }, [path]);
+    const controller = new AbortController();
+    setPhase("loading");
+    setLoadErrorText("");
+
+    fetchConfigData(path, controller.signal)
+      .then((data: ConfigData) => {
+        setConfig(data.config);
+        setSchema(data.schema);
+        setTitle(data.title);
+        setDescription(data.description);
+        setComponentRequiresRestart(data.requires_restart);
+        setPhase("loaded");
+      })
+      .catch((e: Error) => {
+        // A cancelled request (unmount, path change, retry) is not a failure.
+        if (isAbortError(e)) return;
+        setLoadErrorText(e.message);
+        setPhase("failed");
+      });
+
+    return () => controller.abort();
+  }, [path, reloadToken]);
 
   useEffect(() => {
     // config is valid if none of the values are null
@@ -308,14 +311,33 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
     }
   }
 
-  const loading = Object.keys(schema?.properties ?? {}).length === 0;
-
   const updateConfig = (key: string, value: JsonValue): void => {
     setConfig({ ...config, [key]: value });
   };
 
   const properties = schema?.properties ?? {};
   const keys = Object.keys(properties);
+
+  if (phase === "failed") {
+    return (
+      <Card
+        id={`${id}-card`}
+        key={`${id}-card`}
+        loading={false}
+        title={title || path}
+      >
+        <p className="text-danger mb-1">Couldn't load this setting.</p>
+        <p className="text-body-secondary small">{loadErrorText}</p>
+        <button
+          className="btn btn-outline-secondary btn-sm"
+          type="button"
+          onClick={() => setReloadToken((token) => token + 1)}
+        >
+          Retry
+        </button>
+      </Card>
+    );
+  }
 
   return (
     <>
@@ -331,7 +353,7 @@ export function ConfigCard({ path }: ConfigCardProps): JSX.Element | null {
       <Card
         id={`${id}-card`}
         key={`${id}-card`}
-        loading={loading}
+        loading={phase === "loading"}
         title={title}
       >
         <form>
