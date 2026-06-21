@@ -33,6 +33,16 @@ inline constexpr size_t kLogCaptureQueueDepth = 16;
 /// priority 1 matches the other SensESP service tasks.
 inline constexpr uint32_t kLogCaptureTaskStackSize = 4096;
 inline constexpr UBaseType_t kLogCaptureTaskPriority = 1;
+/// Minimum largest-free-block (bytes) required before the capture path will
+/// allocate. Below this, push_line() drops the line instead of building the
+/// std::string/deque record. With C++ exceptions disabled (the default on
+/// ESP32) a failed allocation throws std::bad_alloc, which routes to abort()
+/// and reboots the device -- so the logger must never be the allocation that
+/// exhausts the heap, least of all while capturing the errors that report the
+/// pressure. The margin is far larger than one line (<= kLogCaptureLineMax plus
+/// a deque node) to stay clear of the check-then-allocate race and to leave
+/// contiguous heap for the TLS Signal K connection.
+inline constexpr size_t kLogCaptureMinHeadroomBytes = 8192;
 
 /// One formatted line in transit from the vprintf hook to the capture task.
 /// Copied by value through the queue, so the hook allocates nothing.
@@ -88,7 +98,8 @@ class LogBuffer {
   // in vprintf_trampoline(); a larger value cannot recover more than that
   // buffer already captured.
   explicit LogBuffer(size_t max_lines = 200, uint32_t max_age_ms = 2000,
-                     size_t max_line_length = kLogCaptureLineMax);
+                     size_t max_line_length = kLogCaptureLineMax,
+                     size_t min_headroom_bytes = kLogCaptureMinHeadroomBytes);
 
   /**
    * @brief Install the chained vprintf hook. Call once, early in startup.
@@ -142,6 +153,7 @@ class LogBuffer {
   size_t max_lines_;
   uint32_t max_age_ms_;
   size_t max_line_length_;
+  size_t min_headroom_bytes_;
 
   std::deque<LogRecord> records_;
   uint32_t next_seq_ = 0;

@@ -1,5 +1,6 @@
 #include "sensesp/system/log_buffer.h"
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_timer.h>
@@ -19,10 +20,11 @@ namespace sensesp {
 LogBuffer* LogBuffer::instance_ = nullptr;
 
 LogBuffer::LogBuffer(size_t max_lines, uint32_t max_age_ms,
-                     size_t max_line_length)
+                     size_t max_line_length, size_t min_headroom_bytes)
     : max_lines_(max_lines),
       max_age_ms_(max_age_ms),
       max_line_length_(max_line_length),
+      min_headroom_bytes_(min_headroom_bytes),
       session_id_(0) {
   mutex_ = xSemaphoreCreateMutexStatic(&mutex_buffer_);
 }
@@ -204,6 +206,16 @@ void LogBuffer::push_line(const char* text, size_t length, uint32_t now_ms) {
     length--;
   }
   if (length == 0) {
+    return;
+  }
+
+  // Never let log capture be the allocation that exhausts the heap. strip_ansi()
+  // and the records_ deque below both allocate; with C++ exceptions disabled a
+  // failed allocation throws std::bad_alloc, which routes to abort() and reboots
+  // the device -- so under memory pressure the logger would crash the device
+  // while capturing the very errors that report the pressure. Drop the line
+  // instead, mirroring the queue-full drop policy in enqueue_capture().
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < min_headroom_bytes_) {
     return;
   }
 
