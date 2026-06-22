@@ -7,6 +7,7 @@
 
 #include <ArduinoJson.h>
 #include <esp_websocket_client.h>
+#include <atomic>
 #include <functional>
 #include <list>
 #include <set>
@@ -55,7 +56,10 @@ enum class SKWSConnectionState {
   kSKWSDisconnected,
   kSKWSAuthorizing,
   kSKWSConnecting,
-  kSKWSConnected
+  kSKWSConnected,
+  // TLS certificate pinning rejected the server certificate. Distinct from a
+  // plain disconnect so the UI can tell a cert problem from a network drop.
+  kSKWSCertificateError
 };
 
 /**
@@ -184,42 +188,108 @@ class SKWSClient : public FileSystemSaveable,
   /**
    * @brief Enable or disable TOFU certificate verification.
    *
-   * When enabled, the server certificate fingerprint is captured on first
-   * connection and verified on subsequent connections.
+   * When enabled, the issuing CA (or, for servers that present no CA, the leaf
+   * certificate) is captured on first connection and verified on subsequent
+   * connections.
    */
   void set_tofu_enabled(bool enabled) {
     tofu_enabled_ = enabled;
     save();
   }
 
-  /**
-   * @brief Check if a TOFU fingerprint is stored.
-   */
-  bool has_tofu_fingerprint() const { return !tofu_fingerprint_.isEmpty(); }
+  /// @brief True if any trust anchor (pinned CA or leaf fingerprint) is stored.
+  bool has_tofu_anchor() const {
+    return !tofu_ca_pem_.isEmpty() || !tofu_fingerprint_.isEmpty();
+  }
 
-  /**
-   * @brief Get the stored TOFU fingerprint.
-   */
+  /// @brief True if a pinned CA certificate is stored (CA-anchor mode).
+  bool has_tofu_ca() const { return !tofu_ca_pem_.isEmpty(); }
+  const String& get_tofu_ca() const { return tofu_ca_pem_; }
+
+  /// @brief True if a pinned leaf fingerprint is stored (leaf-fingerprint mode).
+  bool has_tofu_fingerprint() const { return !tofu_fingerprint_.isEmpty(); }
   const String& get_tofu_fingerprint() const { return tofu_fingerprint_; }
 
+  /// @brief Identity (CN) of whatever is pinned, and whether it is a CA.
+  const String& get_tofu_pin_cn() const { return tofu_pin_cn_; }
+  bool is_tofu_pin_ca() const { return tofu_pin_is_ca_; }
+
+  /// @brief TOFU'd leaf identity (normalized DNS SAN set) bound in CA-anchor
+  /// mode. A reconnecting leaf must chain to the pinned CA AND present this same
+  /// identity, so a different leaf from the same CA is rejected. Empty in
+  /// leaf-fingerprint mode (the fingerprint already binds identity).
+  const String& get_tofu_san() const { return tofu_san_; }
+
   /**
-   * @brief Reset the stored TOFU certificate fingerprint.
+   * @brief Reset the stored trust anchor (CA or leaf fingerprint).
    *
-   * Call this when the server certificate has changed legitimately
-   * and you want to trust the new certificate.
+   * Call this when the server's CA has changed legitimately so the device
+   * re-captures it on the next connection. Re-capture is trust-on-first-use;
+   * trigger it on a trusted network.
    */
-  void reset_tofu_fingerprint() {
+  void reset_tofu() {
+    tofu_ca_pem_ = "";
     tofu_fingerprint_ = "";
+    tofu_pin_cn_ = "";
+    tofu_pin_is_ca_ = false;
+    tofu_san_ = "";
     save();
   }
 
-  /**
-   * @brief Set the TOFU fingerprint (called from verify callback).
-   */
-  void set_tofu_fingerprint(const String& fingerprint) {
-    tofu_fingerprint_ = fingerprint;
+  /// @brief Stash a candidate anchor seen during a handshake. Persisted only
+  /// after the connection succeeds (commit_pending_tofu), so an unauthenticated
+  /// MITM handshake cannot plant a trust anchor.
+  void stash_pending_ca(const String& ca_pem, const String& cn) {
+    pending_ca_pem_ = ca_pem;
+    pending_fingerprint_ = "";
+    pending_cn_ = cn;
+    pending_is_ca_ = true;
+    pending_valid_ = true;
+  }
+  void stash_pending_leaf(const String& fingerprint, const String& cn) {
+    pending_ca_pem_ = "";
+    pending_fingerprint_ = fingerprint;
+    pending_cn_ = cn;
+    pending_is_ca_ = false;
+    pending_valid_ = true;
+  }
+  /// @brief Record the leaf's identity (SAN set) for the pending CA anchor,
+  /// captured at depth 0 and committed alongside the CA on success.
+  void set_pending_san(const String& san) { pending_san_ = san; }
+  void clear_pending_tofu() {
+    pending_ca_pem_ = "";
+    pending_fingerprint_ = "";
+    pending_cn_ = "";
+    pending_san_ = "";
+    pending_is_ca_ = false;
+    pending_valid_ = false;
+  }
+  /// @brief True if a candidate CA has already been stashed this handshake.
+  bool has_pending_ca() const { return pending_valid_ && pending_is_ca_; }
+  /// @brief Persist a stashed anchor after a successful (authenticated)
+  /// connection. Called from on_connected().
+  void commit_pending_tofu() {
+    if (!pending_valid_) {
+      return;
+    }
+    tofu_pin_cn_ = pending_cn_;
+    tofu_pin_is_ca_ = pending_is_ca_;
+    if (pending_is_ca_) {
+      tofu_ca_pem_ = pending_ca_pem_;
+      tofu_fingerprint_ = "";
+      tofu_san_ = pending_san_;  // bind the leaf identity in CA-anchor mode
+    } else {
+      tofu_fingerprint_ = pending_fingerprint_;
+      tofu_ca_pem_ = "";
+      tofu_san_ = "";  // leaf mode: the fingerprint binds identity
+    }
+    clear_pending_tofu();
     save();
   }
+
+  /// @brief Flag a certificate rejection from the verify callback so the next
+  /// disconnect surfaces as kSKWSCertificateError rather than a plain disconnect.
+  void flag_cert_error() { cert_error_.store(true); }
 
  protected:
   // these are the actually used values
@@ -245,7 +315,38 @@ class SKWSClient : public FileSystemSaveable,
   // pushed in-stream rather than requiring REST /meta polls.
   bool send_meta_enabled_ = true;
 
+  // TOFU trust anchor. At most one of these is non-empty once captured:
+  //   tofu_ca_pem_      — PEM of the pinned issuing CA (CA-anchor mode)
+  //   tofu_fingerprint_ — SHA256 hex of the pinned leaf (leaf-fingerprint mode,
+  //                       and the legacy on-disk format the migration reads)
   String tofu_fingerprint_ = "";  // SHA256 fingerprint in hex (64 chars)
+  String tofu_ca_pem_ = "";       // PEM of pinned CA (CA-anchor mode)
+  // TOFU'd leaf identity (normalized DNS SAN set) bound in CA-anchor mode, so a
+  // reconnecting leaf must present the same identity AND chain to the pinned CA.
+  // This is what makes CA pinning safe against a public CA (e.g. Let's Encrypt):
+  // a valid leaf for a different name from the same CA fails the identity check.
+  // Empty in leaf-fingerprint mode.
+  String tofu_san_ = "";
+  // Display-only identity of the pinned cert, captured at pin time (X.509
+  // parsing is only available during the handshake). The CN is attacker-
+  // controlled at capture and is bounded + sanitized before storage.
+  String tofu_pin_cn_ = "";
+  bool tofu_pin_is_ca_ = false;
+
+  // Candidate anchor seen during the current connection attempt, persisted only
+  // after the connection succeeds (commit_pending_tofu) so an unauthenticated
+  // MITM handshake cannot plant a trust anchor.
+  String pending_ca_pem_ = "";
+  String pending_fingerprint_ = "";
+  String pending_cn_ = "";
+  String pending_san_ = "";
+  bool pending_is_ca_ = false;
+  bool pending_valid_ = false;
+
+  // Set by the verify callback (transport task) on certificate rejection; read
+  // by set_connection_state to surface kSKWSCertificateError. Atomic because the
+  // callback and state changes may run on different cores.
+  std::atomic<bool> cert_error_{false};
 
   TaskQueueProducer<SKWSConnectionState> connection_state_{
       SKWSConnectionState::kSKWSDisconnected, event_loop()};
@@ -324,6 +425,18 @@ class SKWSClient : public FileSystemSaveable,
   bool detect_ssl();
 
   void set_connection_state(SKWSConnectionState state) {
+    // A certificate rejection during this attempt (flagged by the verify
+    // callback) is surfaced distinctly instead of as a generic disconnect.
+    // This is the single chokepoint, so it covers all four TLS paths — the
+    // three esp_http_client requests and the websocket — without touching each
+    // call site. A fresh attempt (authorizing/connecting) or success clears the
+    // flag.
+    if (state == SKWSConnectionState::kSKWSDisconnected && cert_error_.load()) {
+      state = SKWSConnectionState::kSKWSCertificateError;
+    } else if (state != SKWSConnectionState::kSKWSDisconnected &&
+               state != SKWSConnectionState::kSKWSCertificateError) {
+      cert_error_.store(false);
+    }
     task_connection_state_ = state;
     connection_state_.set(state);
   }
@@ -345,7 +458,8 @@ inline const String ConfigSchema(const SKWSClient& obj) {
   return "{\"type\":\"object\",\"properties\":{"
          "\"ssl_enabled\":{\"title\":\"SSL/TLS Enabled\",\"type\":\"boolean\"},"
          "\"tofu_enabled\":{\"title\":\"TOFU Verification\",\"type\":\"boolean\"},"
-         "\"tofu_fingerprint\":{\"title\":\"Server Fingerprint\",\"type\":\"string\",\"readOnly\":true},"
+         "\"tofu_pin_cn\":{\"title\":\"Pinned Certificate\",\"type\":\"string\",\"readOnly\":true},"
+         "\"tofu_pin_is_ca\":{\"title\":\"Pinned as CA\",\"type\":\"boolean\",\"readOnly\":true},"
          "\"send_meta_enabled\":{\"title\":\"Subscribe with sendMeta=all\","
          "\"description\":\"Request metadata deltas (units, zones, displayName, displayUnits) over the WS stream. Disable only for constrained clients that ignore them.\","
          "\"type\":\"boolean\"}"

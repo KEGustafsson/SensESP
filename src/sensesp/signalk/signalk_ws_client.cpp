@@ -7,9 +7,12 @@
 #include <esp_http_client.h>
 
 #ifdef SENSESP_SSL_SUPPORT
+#include <mbedtls/pem.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
+
+#include "sensesp/signalk/signalk_tofu.h"
 #endif
 
 #include <memory>
@@ -42,76 +45,253 @@ static void sha256_to_hex(const uint8_t* sha256, char* hex) {
   hex[64] = '\0';
 }
 
-// TOFU verification callback - called during SSL handshake
-// Returns 0 to allow connection, non-zero to reject
-static int tofu_verify_callback(void* ctx, mbedtls_x509_crt* crt,
-                                int depth, uint32_t* flags) {
-  // Only check the server certificate (depth 0), not the CA chain
-  if (depth != 0) {
-    *flags = 0;  // Clear errors for intermediate certs
-    return 0;
-  }
-
-  SKWSClient* client = static_cast<SKWSClient*>(ctx);
-  if (client == nullptr) {
-    ESP_LOGW("SKWSClient", "TOFU: No client context, allowing connection");
-    *flags = 0;
-    return 0;
-  }
-
-  // Compute SHA256 of the certificate
+// SHA256 of a certificate's raw DER, as a 64-char hex String.
+static String cert_fingerprint(const mbedtls_x509_crt* crt) {
   uint8_t sha256[32];
-  mbedtls_sha256_context sha256_ctx;
-  mbedtls_sha256_init(&sha256_ctx);
-  mbedtls_sha256_starts(&sha256_ctx, 0);  // 0 = SHA256 (not SHA224)
-  mbedtls_sha256_update(&sha256_ctx, crt->raw.p, crt->raw.len);
-  mbedtls_sha256_finish(&sha256_ctx, sha256);
-  mbedtls_sha256_free(&sha256_ctx);
-
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts(&ctx, 0);  // 0 = SHA256 (not SHA224)
+  mbedtls_sha256_update(&ctx, crt->raw.p, crt->raw.len);
+  mbedtls_sha256_finish(&ctx, sha256);
+  mbedtls_sha256_free(&ctx);
   char hex[65];
   sha256_to_hex(sha256, hex);
-  String current_fingerprint = String(hex);
-
-  ESP_LOGD("SKWSClient", "Server certificate fingerprint: %s", hex);
-
-  if (!client->is_tofu_enabled()) {
-    // TOFU disabled, allow any certificate
-    ESP_LOGD("SKWSClient", "TOFU disabled, allowing connection");
-    *flags = 0;
-    return 0;
-  }
-
-  if (!client->has_tofu_fingerprint()) {
-    // First connection - capture the fingerprint
-    ESP_LOGI("SKWSClient", "TOFU: First connection, capturing fingerprint: %s", hex);
-    client->set_tofu_fingerprint(current_fingerprint);
-    *flags = 0;
-    return 0;
-  }
-
-  // Verify against stored fingerprint
-  if (client->get_tofu_fingerprint() == current_fingerprint) {
-    ESP_LOGD("SKWSClient", "TOFU: Fingerprint verified successfully");
-    *flags = 0;
-    return 0;
-  }
-
-  // Fingerprint mismatch!
-  ESP_LOGE("SKWSClient", "TOFU: Fingerprint mismatch!");
-  ESP_LOGE("SKWSClient", "  Expected: %s", client->get_tofu_fingerprint().c_str());
-  ESP_LOGE("SKWSClient", "  Received: %s", hex);
-  // Return error to reject the connection
-  return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+  return String(hex);
 }
 
-// Certificate bundle attach function for TOFU verification
-// Sets up a custom verification callback that implements Trust On First Use
+// Maximum stored/displayed length of a certificate CN.
+static constexpr size_t kMaxPinCnLen = 64;
+
+// Extract the CN from a certificate subject, for display. The CN is
+// attacker-controlled, so the result is length-bounded and stripped of
+// non-printable and quote/backslash characters before it is stored or shown.
+static String cert_common_name(const mbedtls_x509_crt* crt) {
+  char dn[256];
+  int len = mbedtls_x509_dn_gets(dn, sizeof(dn), &crt->subject);
+  if (len <= 0) {
+    return String("");
+  }
+  const char* cn = strstr(dn, "CN=");
+  if (cn == nullptr) {
+    return String("");
+  }
+  cn += 3;  // skip "CN="
+  String out;
+  for (size_t i = 0; i < kMaxPinCnLen && cn[i] != '\0' && cn[i] != ','; i++) {
+    char c = cn[i];
+    if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') {
+      out += c;
+    }
+  }
+  return out;
+}
+
+// PEM-encode a certificate's DER for storage. Uses a static buffer (the verify
+// callback runs serialized on the TLS task and the task stack is small).
+static String cert_to_pem(const mbedtls_x509_crt* crt) {
+  // Sized for a large CA cert (RSA-4096 + SANs/extensions). On overflow,
+  // mbedtls_pem_write_buffer returns an error and this returns "" -- callers
+  // must treat an empty PEM as "no usable CA" and fail safe, never store it.
+  static unsigned char pem_buf[4096];
+  size_t olen = 0;
+  int r = mbedtls_pem_write_buffer(
+      "-----BEGIN CERTIFICATE-----\n", "-----END CERTIFICATE-----\n",
+      crt->raw.p, crt->raw.len, pem_buf, sizeof(pem_buf), &olen);
+  if (r != 0) {
+    ESP_LOGE("SKWSClient", "TOFU: PEM encode failed (-0x%x)", -r);
+    return String("");
+  }
+  return String(reinterpret_cast<const char*>(pem_buf));
+}
+
+// Normalized (lowercase, sorted, deduplicated, comma-joined) set of the
+// certificate's dNSName SANs, for TOFU identity binding. Empty if the cert has
+// no DNS SAN. Two certs with the same set of names produce the same string
+// regardless of order, so an exact-match comparison is stable across leaf
+// rotation but changes when the identity itself changes.
+static String cert_dns_sans(const mbedtls_x509_crt* crt) {
+  std::set<String> names;
+  for (const mbedtls_x509_sequence* cur = &crt->subject_alt_names;
+       cur != nullptr && cur->buf.p != nullptr; cur = cur->next) {
+    mbedtls_x509_subject_alternative_name san;
+    memset(&san, 0, sizeof(san));
+    if (mbedtls_x509_parse_subject_alt_name(&cur->buf, &san) != 0) {
+      continue;
+    }
+    if (san.type == MBEDTLS_X509_SAN_DNS_NAME &&
+        san.san.unstructured_name.p != nullptr &&
+        san.san.unstructured_name.len > 0) {
+      size_t n = san.san.unstructured_name.len;
+      if (n > 255) {
+        n = 255;
+      }
+      String name;
+      name.reserve(n);
+      for (size_t i = 0; i < n; i++) {
+        char c = static_cast<char>(san.san.unstructured_name.p[i]);
+        if (c >= 'A' && c <= 'Z') {
+          c = static_cast<char>(c + ('a' - 'A'));
+        }
+        name += c;
+      }
+      names.insert(name);
+    }
+    mbedtls_x509_free_subject_alt_name(&san);
+  }
+  String out;
+  for (const String& s : names) {
+    if (!out.isEmpty()) {
+      out += ",";
+    }
+    out += s;
+  }
+  return out;
+}
+
+// TOFU verification callback - called during the TLS handshake, once per
+// presented certificate, highest depth (CA) first down to depth 0 (leaf).
+// Returns 0 to allow, non-zero to reject.
+static int tofu_verify_callback(void* ctx, mbedtls_x509_crt* crt, int depth,
+                                uint32_t* flags) {
+  SKWSClient* client = static_cast<SKWSClient*>(ctx);
+  if (client == nullptr) {
+    ESP_LOGW("SKWSClient", "TOFU: no client context, allowing connection");
+    *flags = 0;
+    return 0;
+  }
+
+  if (!client->is_tofu_enabled()) {
+    // Verification disabled: accept any certificate (insecure opt-out).
+    *flags = 0;
+    return 0;
+  }
+
+  // CA-anchor mode: the stored CA was installed as the trust anchor and esp-tls
+  // runs VERIFY_REQUIRED, so mbedTLS has already validated this certificate and
+  // set *flags. Honor that result rather than clearing it.
+  if (client->has_tofu_ca()) {
+    if (*flags != 0) {
+      ESP_LOGE("SKWSClient", "TOFU: certificate failed CA validation (0x%lx)",
+               (unsigned long)*flags);
+      client->flag_cert_error();
+      return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+    }
+    // Identity binding: at the leaf, require the same SAN identity captured when
+    // the CA was pinned. This is what keeps a public CA safe — a valid leaf for
+    // a different name signed by the same CA (e.g. any Let's Encrypt cert) is
+    // rejected here even though it chains to the pinned CA.
+    if (depth == 0 && !client->get_tofu_san().isEmpty()) {
+      if (cert_dns_sans(crt) != client->get_tofu_san()) {
+        ESP_LOGE("SKWSClient", "TOFU: leaf identity (SAN) mismatch, rejecting");
+        client->flag_cert_error();
+        return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+      }
+    }
+    return 0;
+  }
+
+  // Capture / leaf-fingerprint mode (VERIFY_OPTIONAL). Collect a CA candidate
+  // from the higher-depth certificates (which arrive first), then decide at the
+  // leaf. The first CA:TRUE certificate seen is the highest in the presented
+  // chain (closest to the root), so it is the preferred anchor.
+  // Certificates above the leaf (depth > 0): collect a CA candidate -- the
+  // highest CA:TRUE cert, which arrives first -- and never fail on chain-trust
+  // flags during capture. A depth-0 certificate is ALWAYS treated as the leaf
+  // by the fingerprint/role decision below, even if it is self-signed with
+  // CA:TRUE: a single presented certificate is pinned as a leaf, never adopted
+  // as a CA trust anchor. (Adopting a CA:TRUE leaf here would skip the
+  // fingerprint check and let a mismatched self-signed cert be accepted.)
+  if (depth > 0) {
+    // basicConstraints CA:TRUE has no public getter in mbedTLS 3.x, so the
+    // flag is read through the MBEDTLS_PRIVATE accessor macro.
+    bool is_ca = crt->MBEDTLS_PRIVATE(ca_istrue) != 0;
+    if (is_ca && !client->has_pending_ca()) {
+      String ca_pem = cert_to_pem(crt);
+      // Skip on encode failure: leaving no pending CA fails safe to leaf-
+      // fingerprint mode rather than committing an empty (pin-disabling) anchor.
+      if (!ca_pem.isEmpty()) {
+        client->stash_pending_ca(ca_pem, cert_common_name(crt));
+      }
+    }
+    *flags = 0;
+    return 0;
+  }
+
+  // depth == 0: the leaf. Always run the fingerprint/role decision.
+  String leaf_fp = cert_fingerprint(crt);
+  String leaf_san = cert_dns_sans(crt);
+  bool leaf_matches =
+      client->has_tofu_fingerprint() && client->get_tofu_fingerprint() == leaf_fp;
+  TofuCaptureDecision decision = tofu_decide_capture(
+      client->has_tofu_fingerprint(), leaf_matches, client->has_pending_ca(),
+      !leaf_san.isEmpty());
+
+  switch (decision) {
+    case TofuCaptureDecision::kReject:
+      ESP_LOGE("SKWSClient", "TOFU: leaf fingerprint mismatch, rejecting");
+      client->flag_cert_error();
+      return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+    case TofuCaptureDecision::kCaptureLeaf:
+      ESP_LOGI("SKWSClient", "TOFU: first use, pinning leaf %s", leaf_fp.c_str());
+      client->stash_pending_leaf(leaf_fp, cert_common_name(crt));
+      break;
+    case TofuCaptureDecision::kCaptureCa:
+      ESP_LOGI("SKWSClient", "TOFU: first use, pinning issuing CA (identity %s)",
+               leaf_san.c_str());
+      client->set_pending_san(leaf_san);  // bind the leaf identity to the CA
+      break;
+    case TofuCaptureDecision::kAccept:
+      // Leaf matches the stored fingerprint: keep the leaf pin and drop any
+      // stray pending state (e.g. a CA stashed at depth > 0 this handshake --
+      // mode is fixed at first use, so a later-presented CA is not adopted).
+      client->clear_pending_tofu();
+      break;
+  }
+  *flags = 0;
+  return 0;
+}
+
+// Attach function installed for the TLS connection. In CA-anchor mode it
+// installs the pinned CA as the mbedTLS trust anchor (esp-tls runs
+// VERIFY_REQUIRED, so mbedTLS validates the chain against it); otherwise it
+// selects VERIFY_OPTIONAL so the verify callback can capture / fingerprint.
 static esp_err_t tofu_crt_bundle_attach(void* conf) {
   mbedtls_ssl_config* ssl_conf = static_cast<mbedtls_ssl_config*>(conf);
-  // Use OPTIONAL so we can handle verification ourselves
-  mbedtls_ssl_conf_authmode(ssl_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
-  mbedtls_ssl_conf_verify(ssl_conf, tofu_verify_callback, ws_client);
-  ESP_LOGD("SKWSClient", "TOFU verification callback installed");
+  SKWSClient* client = ws_client;
+
+  if (client != nullptr && client->is_tofu_enabled() && client->has_tofu_ca()) {
+    // Re-parse the stored CA into a static cert that outlives the handshake.
+    static mbedtls_x509_crt pinned_ca;
+    static bool pinned_ca_inited = false;
+    if (pinned_ca_inited) {
+      mbedtls_x509_crt_free(&pinned_ca);
+    }
+    mbedtls_x509_crt_init(&pinned_ca);
+    pinned_ca_inited = true;
+    const String& pem = client->get_tofu_ca();
+    int r = mbedtls_x509_crt_parse(
+        &pinned_ca, reinterpret_cast<const unsigned char*>(pem.c_str()),
+        pem.length() + 1);
+    if (r == 0) {
+      mbedtls_ssl_conf_ca_chain(ssl_conf, &pinned_ca, nullptr);
+      // esp-tls already set VERIFY_REQUIRED before calling us; keep it.
+      ESP_LOGD("SKWSClient", "TOFU: pinned CA installed as trust anchor");
+    } else {
+      // Stored CA won't parse (corruption/bug). Fail closed: leave
+      // VERIFY_REQUIRED with no trust anchor so the handshake is rejected and
+      // surfaces as a certificate error requiring a manual reset -- never
+      // silently downgrade to accept-any.
+      ESP_LOGE("SKWSClient",
+               "TOFU: stored CA failed to parse (-0x%x); connections will fail "
+               "until reset",
+               -r);
+    }
+  } else {
+    // Capture / leaf-fingerprint mode (or TOFU disabled): the callback decides.
+    mbedtls_ssl_conf_authmode(ssl_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+  }
+
+  mbedtls_ssl_conf_verify(ssl_conf, tofu_verify_callback, client);
   return ESP_OK;
 }
 #endif  // SENSESP_SSL_SUPPORT
@@ -248,6 +428,10 @@ void SKWSClient::on_error(int handshake_status) {
  * Called in the websocket task context.
  */
 void SKWSClient::on_connected() {
+  // The connection is fully established and the server proved possession of its
+  // certificate's private key, so it is safe to persist any anchor stashed
+  // during this attempt's handshake (first-use capture).
+  this->commit_pending_tofu();
   this->set_connection_state(SKWSConnectionState::kSKWSConnected);
   this->reset_reconnect_interval();
   this->sk_delta_queue_->reset_meta_send();
@@ -681,9 +865,19 @@ bool SKWSClient::detect_ssl() {
 
 
 void SKWSClient::connect() {
-  if (get_connection_state() != SKWSConnectionState::kSKWSDisconnected) {
+  // A prior certificate rejection leaves the state in kSKWSCertificateError;
+  // treat it like a disconnect for retry purposes so the device keeps trying
+  // (and re-surfaces the cert error each failed attempt).
+  if (get_connection_state() != SKWSConnectionState::kSKWSDisconnected &&
+      get_connection_state() != SKWSConnectionState::kSKWSCertificateError) {
     return;
   }
+
+  // Discard any anchor candidate stashed by a previous attempt; it is only
+  // committed after a fully successful connection (see on_connected). Clearing
+  // here also prevents committing stale data if a resumed TLS session skips the
+  // certificate callback.
+  clear_pending_tofu();
 
   // Schedule next attempt with backoff in case this one fails.
   // Will be reset on successful connection.
@@ -1117,6 +1311,11 @@ void SKWSClient::poll_access_request(const String server_address,
 }
 
 void SKWSClient::connect_ws(const String& host, const uint16_t port) {
+  // Discard any anchor candidate stashed by the earlier esp_http_client legs
+  // (token check / access request). Only the WebSocket handshake -- the one
+  // whose success reaches on_connected and proves the server holds the leaf's
+  // private key -- may populate the anchor that gets committed.
+  clear_pending_tofu();
   set_connection_state(SKWSConnectionState::kSKWSConnecting);
 
   String protocol = ssl_enabled_ ? "wss" : "ws";
@@ -1229,7 +1428,13 @@ bool SKWSClient::to_json(JsonObject& root) {
 
   root["ssl_enabled"] = this->ssl_enabled_;
   root["tofu_enabled"] = this->tofu_enabled_;
+  // Persisted trust anchor: leaf fingerprint (legacy / leaf mode) and/or CA PEM.
   root["tofu_fingerprint"] = this->tofu_fingerprint_;
+  root["tofu_ca_pem"] = this->tofu_ca_pem_;
+  root["tofu_san"] = this->tofu_san_;
+  // Read-only display fields for the pinned identity.
+  root["tofu_pin_cn"] = this->tofu_pin_cn_;
+  root["tofu_pin_is_ca"] = this->tofu_pin_is_ca_;
   root["send_meta_enabled"] = this->send_meta_enabled_;
   return true;
 }
@@ -1262,8 +1467,23 @@ bool SKWSClient::from_json(const JsonObject& config) {
   if (config["tofu_enabled"].is<bool>()) {
     this->tofu_enabled_ = config["tofu_enabled"].as<bool>();
   }
+  // A legacy config carries only tofu_fingerprint (loads as leaf mode — the
+  // migration entry point); newer configs may also carry a pinned CA and the
+  // display fields. Tolerate both.
   if (config["tofu_fingerprint"].is<String>()) {
     this->tofu_fingerprint_ = config["tofu_fingerprint"].as<String>();
+  }
+  if (config["tofu_ca_pem"].is<String>()) {
+    this->tofu_ca_pem_ = config["tofu_ca_pem"].as<String>();
+  }
+  if (config["tofu_san"].is<String>()) {
+    this->tofu_san_ = config["tofu_san"].as<String>();
+  }
+  if (config["tofu_pin_cn"].is<String>()) {
+    this->tofu_pin_cn_ = config["tofu_pin_cn"].as<String>();
+  }
+  if (config["tofu_pin_is_ca"].is<bool>()) {
+    this->tofu_pin_is_ca_ = config["tofu_pin_is_ca"].as<bool>();
   }
   if (config["send_meta_enabled"].is<bool>()) {
     this->send_meta_enabled_ = config["send_meta_enabled"].as<bool>();
@@ -1288,6 +1508,8 @@ String SKWSClient::get_connection_status() {
       return "Connecting";
     case SKWSConnectionState::kSKWSDisconnected:
       return "Disconnected";
+    case SKWSConnectionState::kSKWSCertificateError:
+      return "Certificate verification failed";
   }
 
   return "Unknown";

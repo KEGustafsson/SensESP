@@ -16,7 +16,7 @@ void add_tofu_reset_handler(std::shared_ptr<HTTPServer>& server) {
           httpd_resp_send(req, "WebSocket client not available", 0);
           return ESP_OK;
         }
-        ws_client->reset_tofu_fingerprint();
+        ws_client->reset_tofu();
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"status\":\"ok\"}", 0);
         return ESP_OK;
