@@ -103,7 +103,7 @@ class SKWSClient : public FileSystemSaveable,
   String get_connection_status();
 
   /////////////////////////////////////////////////////////
-  // SKWSClient task methods
+  // SK websocket connection methods
 
   void on_disconnected();
   // handshake_status is the HTTP status of a failed WebSocket upgrade (0 if not
@@ -447,7 +447,7 @@ class SKWSClient : public FileSystemSaveable,
   void process_received_updates();
 
   /////////////////////////////////////////////////////////
-  // SKWSClient task methods
+  // SK websocket connection methods
 
 #ifndef SENSESP_SSL_SUPPORT
   // Validate the auth token over plain HTTP before opening the WebSocket
