@@ -31,6 +31,10 @@ namespace sensesp {
 constexpr int kWsClientTaskStackSize = 8192;  // Stack for ExecuteWebSocketTask
 constexpr int kWsTransportTaskStackSize = 6144;  // Stack for esp_websocket_client internal task
 constexpr TickType_t kWsSendTimeoutTicks = pdMS_TO_TICKS(5000);
+// Periodic delta telemetry must never block the caller (it will be driven from
+// the event loop). 0 = enqueue if the ws-client lock and transport are free
+// right now, otherwise fail fast. Deltas are supersedable. See SignalK/SensESP#1033.
+constexpr TickType_t kWsDeltaSendTimeoutTicks = 0;
 
 SKWSClient* ws_client;
 
@@ -1403,13 +1407,18 @@ void SKWSClient::send_delta() {
       sk_delta_queue_->get_deltas(deltas);
       for (const auto& delta : deltas) {
         int send_result = esp_websocket_client_send_text(
-            client_, delta.c_str(), delta.length(), kWsSendTimeoutTicks);
+            client_, delta.c_str(), delta.length(), kWsDeltaSendTimeoutTicks);
         if (send_result < 0) {
-          ESP_LOGE(__FILENAME__,
-                   "WebSocket send failed (result=%d), restarting",
+          // Non-blocking send (0 timeout) did not complete: either brief
+          // ws-client lock contention (retry next cycle) or the transport
+          // backpressured and esp_websocket_client aborted the connection
+          // internally -- its disconnect/error event drives reconnect. Never
+          // block or tear the connection down from here. Deltas are
+          // supersedable, so drop the rest of this batch. See SignalK/SensESP#1033.
+          ESP_LOGW(__FILENAME__,
+                   "Delta send incomplete (result=%d); dropping rest of batch",
                    send_result);
-          this->restart();
-          return;
+          break;
         }
         this->delta_tx_tick_producer_.set(1);
       }
