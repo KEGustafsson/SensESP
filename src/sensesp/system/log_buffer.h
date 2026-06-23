@@ -27,7 +27,7 @@ struct LogRecord {
 inline constexpr size_t kLogCaptureLineMax = 256;
 /// Depth of the lock-free handoff queue between the vprintf hook and the
 /// capture task. Bursts beyond this drop lines rather than block the logger.
-inline constexpr size_t kLogCaptureQueueDepth = 16;
+inline constexpr size_t kLogCaptureQueueDepth = 8;
 /// Stack (bytes) and priority of the capture task. The task does the
 /// heap-allocating work the hook offloads, so its stack must be roomy;
 /// priority 1 matches the other SensESP service tasks.
@@ -97,7 +97,7 @@ class LogBuffer {
   // max_line_length defaults to kLogCaptureLineMax to match the capture buffer
   // in vprintf_trampoline(); a larger value cannot recover more than that
   // buffer already captured.
-  explicit LogBuffer(size_t max_lines = 200, uint32_t max_age_ms = 2000,
+  explicit LogBuffer(size_t max_lines = 100, uint32_t max_age_ms = 2000,
                      size_t max_line_length = kLogCaptureLineMax,
                      size_t min_headroom_bytes = kLogCaptureMinHeadroomBytes);
 
