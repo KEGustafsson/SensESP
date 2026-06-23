@@ -28,7 +28,7 @@
 
 namespace sensesp {
 
-constexpr int kWsClientTaskStackSize = 8192;  // Stack for ExecuteWebSocketTask
+constexpr int kWsClientTaskStackSize = 8192;  // Stack for the connect worker
 constexpr int kWsTransportTaskStackSize = 6144;  // Stack for esp_websocket_client internal task
 constexpr TickType_t kWsSendTimeoutTicks = pdMS_TO_TICKS(5000);
 // Periodic delta telemetry must never block the caller (it will be driven from
@@ -342,24 +342,6 @@ static void websocket_event_handler(void* handler_args,
   }
 }
 
-void ExecuteWebSocketTask(void* /*parameter*/) {
-  elapsedMillis delta_loop_elapsed = 0;
-
-  ws_client->connect();
-
-  while (true) {
-    if (ws_client->is_connect_due()) {
-      ws_client->connect();
-    }
-    if (delta_loop_elapsed > 5) {
-      delta_loop_elapsed = 0;
-      ws_client->send_delta();
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-
 SKWSClient::SKWSClient(const String& config_path,
                        std::shared_ptr<SKDeltaQueue> sk_delta_queue,
                        const String& server_address, uint16_t server_port,
@@ -389,8 +371,18 @@ SKWSClient::SKWSClient(const String& config_path,
 
   event_loop()->onDelay(0, [this]() {
     ESP_LOGD(__FILENAME__, "Starting SKWSClient");
-    xTaskCreate(ExecuteWebSocketTask, "SKWSClient", kWsClientTaskStackSize,
-                this, 1, NULL);
+    // Run the connection lifecycle on the event loop instead of a dedicated
+    // task: connect() is a non-blocking dispatcher (it spawns a worker for the
+    // blocking auth legs) and send_delta() is non-blocking, so neither stalls
+    // the loop. The ~100 ms cadence matches the former task's vTaskDelay(100ms).
+    event_loop()->onRepeat(100, [this]() {
+      // Retry a teardown whose reaper failed to spawn under OOM (no-op if none).
+      reap_async(pending_teardown_.load());
+      if (is_connect_due()) {
+        connect();
+      }
+      send_delta();
+    });
     MDNS.addService("signalk-sensesp", "tcp", 80);
   });
 }
@@ -1467,6 +1459,27 @@ void SKWSClient::teardown_task(void* arg) {
   vTaskDelete(nullptr);
 }
 
+void SKWSClient::reap_async(esp_websocket_client_handle_t old) {
+  if (old == nullptr) {
+    return;
+  }
+  auto* arg = new WsTeardownArg{old, this};
+  if (xTaskCreate(&SKWSClient::teardown_task, "SKWSTeardown", 4096, arg, 1,
+                  nullptr) == pdPASS) {
+    // The task now owns `old` and clears teardown_in_progress_ when done.
+    pending_teardown_.store(nullptr);
+    return;
+  }
+  // Spawn failed (OOM). Do NOT reap synchronously: a ~1 s stop()+destroy() on
+  // the event loop would stall every consumer under the exact heap pressure
+  // this path exists for. Stash the handle and retry on the next loop tick;
+  // teardown_in_progress_ stays set so bring-up remains deferred (at most one
+  // un-reaped client, no leak beyond it).
+  delete arg;
+  pending_teardown_.store(old);
+  ESP_LOGW(__FILENAME__, "teardown task spawn failed; will retry next cycle");
+}
+
 void SKWSClient::detach_teardown() {
   // Single atomic check-and-null: if two contexts race here, only one gets the
   // handle, so it is stopped/destroyed exactly once (no double-free).
@@ -1478,17 +1491,7 @@ void SKWSClient::detach_teardown() {
   // while being reaped is dropped by websocket_event_handler.
   client_generation_.fetch_add(1);
   teardown_in_progress_.store(true);
-  auto* arg = new WsTeardownArg{old, this};
-  if (xTaskCreate(&SKWSClient::teardown_task, "SKWSTeardown", 4096, arg, 1,
-                  nullptr) != pdPASS) {
-    // Spawn failed (OOM): reap synchronously rather than leak the handle. Rare;
-    // blocking here is an acceptable last resort.
-    ESP_LOGE(__FILENAME__, "teardown task spawn failed; reaping synchronously");
-    esp_websocket_client_stop(old);
-    esp_websocket_client_destroy(old);
-    teardown_in_progress_.store(false);
-    delete arg;
-  }
+  reap_async(old);
 }
 
 void SKWSClient::restart() {

@@ -119,11 +119,11 @@ class SKWSClient : public FileSystemSaveable,
   /// @brief Drop the current connection (detached, non-blocking teardown) and
   /// let the reconnect path rebuild it.
   ///
-  /// @warning Must run on the SK connection context only (the SKWSClient task
-  /// today; the event loop after the fold). It does not check auth_job_running_,
-  /// so calling it concurrently with a running connect worker could interleave
-  /// its client_.exchange(nullptr) with the worker's client_.store(h) and orphan
-  /// a live client (leak + dropped events). Has no callers today. See #1033.
+  /// @warning Must run on the event-loop (SK connection) context only. It does
+  /// not check auth_job_running_, so calling it concurrently with a running
+  /// connect worker could interleave its client_.exchange(nullptr) with the
+  /// worker's client_.store(h) and orphan a live client (leak + dropped events).
+  /// Has no callers today. See #1033.
   void restart();
   bool is_connect_due() const { return millis() >= next_attempt_ms_; }
   void send_delta();
@@ -373,10 +373,12 @@ class SKWSClient : public FileSystemSaveable,
   // SK/event-loop context loads it to send and reaps it via exchange(nullptr)
   // (single check-and-null, so no double-free). Writers are serialized
   // single-owner-at-a-time by auth_job_running_ / teardown_in_progress_.
-  // NOTE: the atomic does NOT confer lifetime safety — a cross-task sender that
-  // already loaded the handle can still race the detached teardown's destroy()
-  // (narrow window, pre-existing since the teardown was detached; tracked for
-  // the fold commit, where all sends move onto one context). See #1033.
+  // NOTE: the atomic confers pointer-atomicity, not lifetime safety. send_delta
+  // and sendTXT run on the event loop, serialized with detach_teardown (same
+  // context), so they cannot hold a handle across its reap. Transport-task
+  // senders (on_connected -> subscribe_listeners, on_receive_put's response)
+  // are made safe by esp_websocket_client_stop() joining the transport task
+  // before destroy() frees the struct. See #1033.
   std::atomic<esp_websocket_client_handle_t> client_{nullptr};
   // Bumped on every teardown so the (singleton) event handler can drop late
   // callbacks from a client that has been handed off for destruction. The
@@ -390,6 +392,11 @@ class SKWSClient : public FileSystemSaveable,
   // (mDNS / SSL-detect / access-request / poll legs). The dispatcher skips
   // while it is set, so at most one attempt runs at a time.
   std::atomic<bool> auth_job_running_{false};
+  // Holds a handle whose detached reaper task failed to spawn (OOM); the event
+  // loop retries the spawn each tick rather than reaping it synchronously (which
+  // would block the loop). At most one at a time (teardown_in_progress_ defers
+  // bring-up until it is reaped).
+  std::atomic<esp_websocket_client_handle_t> pending_teardown_{nullptr};
   std::shared_ptr<SKDeltaQueue> sk_delta_queue_;
   /// @brief Emits the number of deltas sent since last report
   TaskQueueProducer<int> delta_tx_tick_producer_{0, event_loop(), 990};
@@ -458,6 +465,10 @@ class SKWSClient : public FileSystemSaveable,
   /// bumps client_generation_ / sets teardown_in_progress_ immediately; no-op if
   /// client_ is null. The OOM-spawn fallback reaps synchronously.
   void detach_teardown();
+  /// @brief Spawn the detached reaper for `old`; on spawn failure (OOM) stash it
+  /// in pending_teardown_ for a later retry instead of blocking the loop with a
+  /// synchronous reap. No-op if `old` is null. Call on the event-loop context.
+  void reap_async(esp_websocket_client_handle_t old);
   /// @brief Body of the detached teardown task (stop+destroy+self-delete).
   static void teardown_task(void* arg);
   /// @brief The (blocking) connect attempt — mDNS resolve, SSL detect, and the
