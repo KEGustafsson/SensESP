@@ -16,6 +16,7 @@
 #endif
 
 #include <memory>
+#include <new>
 
 #include "Arduino.h"
 #include "elapsedMillis.h"
@@ -90,22 +91,34 @@ static String cert_common_name(const mbedtls_x509_crt* crt) {
   return out;
 }
 
-// PEM-encode a certificate's DER for storage. Uses a static buffer (the verify
-// callback runs serialized on the TLS task and the task stack is small).
+// PEM-encode a certificate's DER for storage. The encode buffer is allocated on
+// demand and freed on return rather than held for the device's lifetime: TOFU CA
+// capture happens only during the TLS handshake, so a permanent .bss buffer
+// would waste ~4 KB for the whole uptime. It is heap- rather than stack-
+// allocated because the verify callback runs on a small TLS task stack.
 static String cert_to_pem(const mbedtls_x509_crt* crt) {
-  // Sized for a large CA cert (RSA-4096 + SANs/extensions). On overflow,
-  // mbedtls_pem_write_buffer returns an error and this returns "" -- callers
-  // must treat an empty PEM as "no usable CA" and fail safe, never store it.
-  static unsigned char pem_buf[4096];
+  // Sized for a large CA cert (RSA-4096 + SANs/extensions). The size is fixed,
+  // not derived from crt->raw.len: PEM is base64 (~4/3 of the DER) plus the
+  // header/footer and line breaks, so the encoded form is always larger than the
+  // DER. On overflow mbedtls_pem_write_buffer returns an error and this returns
+  // "" -- callers must treat an empty PEM as "no usable CA" and fail safe, never
+  // store it.
+  constexpr size_t kPemBufSize = 4096;
+  std::unique_ptr<unsigned char[]> pem_buf(
+      new (std::nothrow) unsigned char[kPemBufSize]);
+  if (!pem_buf) {
+    ESP_LOGE("SKWSClient", "TOFU: PEM buffer allocation failed");
+    return String("");
+  }
   size_t olen = 0;
   int r = mbedtls_pem_write_buffer(
       "-----BEGIN CERTIFICATE-----\n", "-----END CERTIFICATE-----\n",
-      crt->raw.p, crt->raw.len, pem_buf, sizeof(pem_buf), &olen);
+      crt->raw.p, crt->raw.len, pem_buf.get(), kPemBufSize, &olen);
   if (r != 0) {
     ESP_LOGE("SKWSClient", "TOFU: PEM encode failed (-0x%x)", -r);
     return String("");
   }
-  return String(reinterpret_cast<const char*>(pem_buf));
+  return String(reinterpret_cast<const char*>(pem_buf.get()));
 }
 
 // Normalized (lowercase, sorted, deduplicated, comma-joined) set of the
