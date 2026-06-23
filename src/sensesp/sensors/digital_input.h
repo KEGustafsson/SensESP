@@ -102,15 +102,7 @@ class DigitalInputCounter : public DigitalInput, public Sensor<int> {
                       unsigned int read_delay, String config_path = "")
       : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
                             config_path, [this]() { this->counter_ = this->counter_ + 1; }) {
-    isr_event_ = event_loop()->onInterrupt(pin_, interrupt_type_, interrupt_handler_);
-
-    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
-      noInterrupts();
-      output_ = counter_;
-      counter_ = 0;
-      interrupts();
-      notify();
-    });
+    register_events();
   }
 
   virtual ~DigitalInputCounter() {
@@ -126,15 +118,44 @@ class DigitalInputCounter : public DigitalInput, public Sensor<int> {
   virtual bool from_json(const JsonObject& config) override;
 
  protected:
+  // load() calls the virtual from_json(). Inside a base-class constructor the
+  // dynamic type is still the base, so loading there dispatches to the base
+  // from_json() and silently drops fields a derived class adds. A derived class
+  // with extra config therefore constructs with kNo and calls load() from its
+  // own constructor body, where the full dynamic type is established.
+  enum class LoadConfig { kNo, kYes };
+
   DigitalInputCounter(uint8_t pin, int pin_mode, int interrupt_type,
                       unsigned int read_delay, String config_path,
                       std::function<void()> interrupt_handler)
+      : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
+                            config_path, interrupt_handler, LoadConfig::kYes) {}
+
+  DigitalInputCounter(uint8_t pin, int pin_mode, int interrupt_type,
+                      unsigned int read_delay, String config_path,
+                      std::function<void()> interrupt_handler,
+                      LoadConfig load_config)
       : DigitalInput{pin, pin_mode},
         Sensor<int>(config_path),
         read_delay_{read_delay},
         interrupt_type_{interrupt_type},
         interrupt_handler_{interrupt_handler} {
-    load();
+    if (load_config == LoadConfig::kYes) {
+      load();
+    }
+  }
+
+  // Call after member init and after load(): registration captures read_delay_,
+  // which load() may overwrite from persisted config.
+  void register_events() {
+    isr_event_ = event_loop()->onInterrupt(pin_, interrupt_type_, interrupt_handler_);
+    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
+      noInterrupts();
+      output_ = counter_;
+      counter_ = 0;
+      interrupts();
+      notify();
+    });
   }
 
   unsigned int read_delay_;
@@ -179,8 +200,16 @@ class DigitalInputDebounceCounter : public DigitalInputCounter {
                               unsigned int ignore_interval_ms,
                               String config_path = "")
       : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
-                            config_path, [this]() { this->handleInterrupt(); }),
-        ignore_interval_ms_{ignore_interval_ms} {}
+                            config_path, [this]() { this->handleInterrupt(); },
+                            LoadConfig::kNo),
+        ignore_interval_ms_{ignore_interval_ms} {
+    // Load here, not in the base ctor (LoadConfig::kNo above): only now is the
+    // dynamic type complete, so from_json() dispatches to this class's override
+    // and ignore_interval is restored. ignore_interval_ms_ is already set, so a
+    // persisted value overrides the constructor default.
+    load();
+    register_events();
+  }
 
  private:
   void handleInterrupt();
