@@ -14,8 +14,14 @@
 #include "sensesp/system/serializable.h"
 #include "sensesp_base_app.h"
 
+// HTTP server worker task stack. Measured worst case on an ESP32-C3 was ~3.4 KB
+// used by a config PUT (max-nesting JSON deserialize + SPIFFS save, with a long
+// request URI on the same frame). The digest-auth path (a 1024-byte
+// Authorization buffer + MD5/String temporaries) runs and returns before the
+// handler, so it never stacks on top of it. 6144 leaves ~2.7 KB of headroom
+// over the deepest measured path.
 #ifndef HTTP_SERVER_STACK_SIZE
-#define HTTP_SERVER_STACK_SIZE 8192
+#define HTTP_SERVER_STACK_SIZE 6144
 #endif
 
 namespace sensesp {

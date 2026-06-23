@@ -1,8 +1,13 @@
 #include "base_command_handler.h"
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
+#include <new>
 
 #include "sensesp/net/web/autogen/frontend_files.h"
 #include "sensesp/system/log_buffer.h"
@@ -97,6 +102,32 @@ void add_http_info_handler(std::shared_ptr<HTTPServer>& server) {
              info_item != status_page_items->end(); ++info_item) {
           info_items.add(info_item->second->as_json());
         }
+
+        // Per-task minimum-ever free stack, grouped under "Task stack free
+        // (bytes)", for spotting over- or under-provisioned task stacks.
+        // Computed live per request; needs the FreeRTOS trace facility, which
+        // the Arduino/ESP-IDF default config enables.
+#if defined(CONFIG_FREERTOS_USE_TRACE_FACILITY) && \
+    CONFIG_FREERTOS_USE_TRACE_FACILITY
+        // Over-allocate a few slots so a task created between the count and the
+        // snapshot can't undersize the array: uxTaskGetSystemState returns 0 on
+        // an undersized buffer, which would drop the whole section that request.
+        UBaseType_t task_slots = uxTaskGetNumberOfTasks() + 4;
+        std::unique_ptr<TaskStatus_t[]> tasks(
+            new (std::nothrow) TaskStatus_t[task_slots]);
+        if (tasks) {
+          UBaseType_t n = uxTaskGetSystemState(tasks.get(), task_slots, nullptr);
+          for (UBaseType_t i = 0; i < n; i++) {
+            JsonDocument item;
+            item["name"] = tasks[i].pcTaskName;
+            item["value"] = static_cast<uint32_t>(
+                tasks[i].usStackHighWaterMark * sizeof(StackType_t));
+            item["group"] = "Task stack free (bytes)";
+            item["order"] = kUIOutputDefaultOrder;
+            info_items.add(item);
+          }
+        }
+#endif
 
         String response;
         serializeJson(json_doc, response);

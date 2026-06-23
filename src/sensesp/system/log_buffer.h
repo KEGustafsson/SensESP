@@ -29,9 +29,11 @@ inline constexpr size_t kLogCaptureLineMax = 256;
 /// capture task. Bursts beyond this drop lines rather than block the logger.
 inline constexpr size_t kLogCaptureQueueDepth = 8;
 /// Stack (bytes) and priority of the capture task. The task does the
-/// heap-allocating work the hook offloads, so its stack must be roomy;
-/// priority 1 matches the other SensESP service tasks.
-inline constexpr uint32_t kLogCaptureTaskStackSize = 4096;
+/// heap-allocating work the hook offloads (ANSI strip + std::string build + a
+/// largest-free-block probe). Measured worst case ~0.7 KB used on an ESP32-C3;
+/// 3072 keeps a conservative margin because this task allocates under memory
+/// pressure. Priority 1 matches the other SensESP service tasks.
+inline constexpr uint32_t kLogCaptureTaskStackSize = 3072;
 inline constexpr UBaseType_t kLogCaptureTaskPriority = 1;
 /// Minimum largest-free-block (bytes) required before the capture path will
 /// allocate. Below this, push_line() drops the line instead of building the
