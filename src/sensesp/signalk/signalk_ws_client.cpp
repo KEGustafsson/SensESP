@@ -1506,6 +1506,7 @@ void SKWSClient::send_delta() {
     if (sk_delta_queue_->data_available()) {
       std::vector<String> deltas;
       sk_delta_queue_->get_deltas(deltas);
+      bool first = true;
       for (const auto& delta : deltas) {
         int send_result = esp_websocket_client_send_text(
             client_.load(), delta.c_str(), delta.length(), kWsDeltaSendTimeoutTicks);
@@ -1516,12 +1517,21 @@ void SKWSClient::send_delta() {
           // internally -- its disconnect/error event drives reconnect. Never
           // block or tear the connection down from here. Deltas are
           // supersedable, so drop the rest of this batch. See SignalK/SensESP#1033.
+          if (first) {
+            // get_deltas() builds one-shot metadata (units, zones, ...) into the
+            // first delta and marks it sent before it leaves the device. The
+            // first delta is the only one that can carry that metadata, so if its
+            // send is the one that fails, re-arm metadata for the next batch --
+            // otherwise the server runs without it until the next reconnect.
+            sk_delta_queue_->reset_meta_send();
+          }
           ESP_LOGW(__FILENAME__,
                    "Delta send incomplete (result=%d); dropping rest of batch",
                    send_result);
           break;
         }
         this->delta_tx_tick_producer_.set(1);
+        first = false;
       }
     }
   }
