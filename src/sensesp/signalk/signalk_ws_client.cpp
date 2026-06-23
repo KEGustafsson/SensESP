@@ -28,9 +28,13 @@
 
 namespace sensesp {
 
-constexpr int kWsClientTaskStackSize = 8192;  // Stack for ExecuteWebSocketTask
+constexpr int kWsClientTaskStackSize = 8192;  // Stack for the connect worker
 constexpr int kWsTransportTaskStackSize = 6144;  // Stack for esp_websocket_client internal task
 constexpr TickType_t kWsSendTimeoutTicks = pdMS_TO_TICKS(5000);
+// Periodic delta telemetry must never block the caller (it will be driven from
+// the event loop). 0 = enqueue if the ws-client lock and transport are free
+// right now, otherwise fail fast. Deltas are supersedable. See SignalK/SensESP#1033.
+constexpr TickType_t kWsDeltaSendTimeoutTicks = 0;
 
 SKWSClient* ws_client;
 
@@ -299,6 +303,14 @@ static esp_err_t tofu_crt_bundle_attach(void* conf) {
 static void websocket_event_handler(void* handler_args,
                                     esp_event_base_t base,
                                     int32_t event_id, void* event_data) {
+  // Drop events from a client that has been handed off for destruction: the
+  // handler was registered with the generation current at build time; if that no
+  // longer matches the live generation, this callback is from a reaped client.
+  if (ws_client == nullptr ||
+      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handler_args)) !=
+          ws_client->client_generation()) {
+    return;
+  }
   esp_websocket_event_data_t* data = (esp_websocket_event_data_t*)event_data;
   switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
@@ -330,24 +342,6 @@ static void websocket_event_handler(void* handler_args,
   }
 }
 
-void ExecuteWebSocketTask(void* /*parameter*/) {
-  elapsedMillis delta_loop_elapsed = 0;
-
-  ws_client->connect();
-
-  while (true) {
-    if (ws_client->is_connect_due()) {
-      ws_client->connect();
-    }
-    if (delta_loop_elapsed > 5) {
-      delta_loop_elapsed = 0;
-      ws_client->send_delta();
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-
 SKWSClient::SKWSClient(const String& config_path,
                        std::shared_ptr<SKDeltaQueue> sk_delta_queue,
                        const String& server_address, uint16_t server_port,
@@ -377,8 +371,18 @@ SKWSClient::SKWSClient(const String& config_path,
 
   event_loop()->onDelay(0, [this]() {
     ESP_LOGD(__FILENAME__, "Starting SKWSClient");
-    xTaskCreate(ExecuteWebSocketTask, "SKWSClient", kWsClientTaskStackSize,
-                this, 1, NULL);
+    // Run the connection lifecycle on the event loop instead of a dedicated
+    // task: connect() is a non-blocking dispatcher (it spawns a worker for the
+    // blocking auth legs) and send_delta() is non-blocking, so neither stalls
+    // the loop. The ~100 ms cadence matches the former task's vTaskDelay(100ms).
+    event_loop()->onRepeat(100, [this]() {
+      // Retry a teardown whose reaper failed to spawn under OOM (no-op if none).
+      reap_async(pending_teardown_.load());
+      if (is_connect_due()) {
+        connect();
+      }
+      send_delta();
+    });
     MDNS.addService("signalk-sensesp", "tcp", 80);
   });
 }
@@ -480,7 +484,7 @@ void SKWSClient::subscribe_listeners() {
     ESP_LOGI(__FILENAME__, "Subscription JSON message:\n %s",
              json_message.c_str());
     int result = esp_websocket_client_send_text(
-        client_, json_message.c_str(), json_message.length(),
+        client_.load(), json_message.c_str(), json_message.length(),
         kWsSendTimeoutTicks);
     if (result < 0) {
       ESP_LOGE(__FILENAME__, "Subscription send failed (result=%d)", result);
@@ -750,7 +754,7 @@ void SKWSClient::on_receive_put(JsonDocument& message) {
     String response_text;
     serializeJson(put_response, response_text);
     int result = esp_websocket_client_send_text(
-        client_, response_text.c_str(), response_text.length(),
+        client_.load(), response_text.c_str(), response_text.length(),
         kWsSendTimeoutTicks);
     if (result < 0) {
       ESP_LOGE(__FILENAME__, "PUT response send failed (result=%d)", result);
@@ -768,7 +772,7 @@ void SKWSClient::on_receive_put(JsonDocument& message) {
 void SKWSClient::sendTXT(String& payload) {
   if (get_connection_state() == SKWSConnectionState::kSKWSConnected) {
     int result = esp_websocket_client_send_text(
-        client_, payload.c_str(), payload.length(), kWsSendTimeoutTicks);
+        client_.load(), payload.c_str(), payload.length(), kWsSendTimeoutTicks);
     if (result < 0) {
       ESP_LOGE(__FILENAME__, "sendTXT failed (result=%d)", result);
     }
@@ -873,6 +877,21 @@ void SKWSClient::connect() {
     return;
   }
 
+  // A connect attempt is already running on a worker task; let it finish.
+  if (auth_job_running_.load()) {
+    return;
+  }
+
+  // Reap any client left from a previous attempt before starting a new one,
+  // off this context. While the reap is in flight, defer bring-up so at most one
+  // client ever exists; state stays Disconnected, so a later cycle retries.
+  if (client_.load() != nullptr) {
+    detach_teardown();
+  }
+  if (teardown_in_progress_.load()) {
+    return;
+  }
+
   // Discard any anchor candidate stashed by a previous attempt; it is only
   // committed after a fully successful connection (see on_connected). Clearing
   // here also prevents committing stale data if a resumed TLS session skips the
@@ -894,9 +913,31 @@ void SKWSClient::connect() {
     return;
   }
 
+  set_connection_state(SKWSConnectionState::kSKWSAuthorizing);
+
+  // The rest of the attempt — mDNS resolve, SSL detect, and the access-request /
+  // poll / connect_ws leg — makes blocking HTTP/mDNS calls, so run it on a
+  // one-shot worker task. The SK/event-loop context stays responsive, and
+  // auth_job_running_ keeps at most one attempt in flight.
+  auth_job_running_.store(true);
+  if (xTaskCreate(&SKWSClient::connect_worker, "SKWSConnect",
+                  kWsClientTaskStackSize, this, 1, nullptr) != pdPASS) {
+    ESP_LOGE(__FILENAME__, "connect worker spawn failed");
+    auth_job_running_.store(false);
+    set_connection_state(SKWSConnectionState::kSKWSDisconnected);
+  }
+}
+
+void SKWSClient::connect_worker(void* arg) {
+  auto* self = static_cast<SKWSClient*>(arg);
+  self->run_connect_attempt();
+  self->auth_job_running_.store(false);
+  vTaskDelete(nullptr);
+}
+
+void SKWSClient::run_connect_attempt() {
   ESP_LOGI(__FILENAME__, "Initiating websocket connection with server...");
 
-  set_connection_state(SKWSConnectionState::kSKWSAuthorizing);
   if (use_mdns_) {
     if (!get_mdns_service(this->server_address_, this->server_port_)) {
       ESP_LOGE(__FILENAME__,
@@ -1257,6 +1298,7 @@ void SKWSClient::poll_access_request(const String server_address,
     if (error) {
       ESP_LOGW(__FILENAME__, "WARNING: Could not deserialize http payload.");
       ESP_LOGW(__FILENAME__, "DeserializationError: %s", error.c_str());
+      set_connection_state(SKWSConnectionState::kSKWSDisconnected);
       return;
     }
     String state = doc["state"];
@@ -1308,9 +1350,23 @@ void SKWSClient::poll_access_request(const String server_address,
     set_connection_state(SKWSConnectionState::kSKWSDisconnected);
     return;
   }
+  // Catch-all: a 200/202 COMPLETED whose permission is neither APPROVED nor
+  // DENIED, or any unexpected state, leaves no terminal state. With no live
+  // client, no event will move us off Authorizing, so fall back to Disconnected
+  // to retry rather than wedge.
+  set_connection_state(SKWSConnectionState::kSKWSDisconnected);
 }
 
 void SKWSClient::connect_ws(const String& host, const uint16_t port) {
+  // connect() reaps any prior client before dispatching here, so client_ is
+  // null and no teardown is in flight. Guard defensively against a leak.
+  if (client_.load() != nullptr || teardown_in_progress_.load()) {
+    ESP_LOGW(__FILENAME__, "connect_ws: prior client not reaped; deferring");
+    detach_teardown();
+    set_connection_state(SKWSConnectionState::kSKWSDisconnected);
+    return;
+  }
+
   // Discard any anchor candidate stashed by the earlier esp_http_client legs
   // (token check / access request). Only the WebSocket handshake -- the one
   // whose success reaches on_connected and proves the server holds the leaf's
@@ -1349,31 +1405,30 @@ void SKWSClient::connect_ws(const String& host, const uint16_t port) {
   }
 #endif
 
-  // Destroy any existing client
-  if (client_ != nullptr) {
-    esp_websocket_client_stop(client_);
-    esp_websocket_client_destroy(client_);
-    client_ = nullptr;
-  }
-
-  client_ = esp_websocket_client_init(&config);
-  if (client_ == nullptr) {
+  esp_websocket_client_handle_t h = esp_websocket_client_init(&config);
+  if (h == nullptr) {
     ESP_LOGE(__FILENAME__, "Failed to initialize WebSocket client");
     set_connection_state(SKWSConnectionState::kSKWSDisconnected);
     return;
   }
+  client_.store(h);
 
-  // Register event handler
-  esp_websocket_register_events(client_, WEBSOCKET_EVENT_ANY,
-                                websocket_event_handler, nullptr);
+  // Register the event handler tagged with the current generation, so that any
+  // late event from this client after it is later handed off for destruction is
+  // dropped by websocket_event_handler (generation mismatch).
+  esp_websocket_register_events(
+      h, WEBSOCKET_EVENT_ANY, websocket_event_handler,
+      reinterpret_cast<void*>(
+          static_cast<uintptr_t>(client_generation_.load())));
 
   // Start the client
-  esp_err_t err = esp_websocket_client_start(client_);
+  esp_err_t err = esp_websocket_client_start(h);
   if (err != ESP_OK) {
     ESP_LOGE(__FILENAME__, "Failed to start WebSocket client: %s",
              esp_err_to_name(err));
-    esp_websocket_client_destroy(client_);
-    client_ = nullptr;
+    // Null the shared handle before freeing it so a concurrent send sees null.
+    client_.store(nullptr);
+    esp_websocket_client_destroy(h);
     set_connection_state(SKWSConnectionState::kSKWSDisconnected);
     return;
   }
@@ -1385,15 +1440,65 @@ bool SKWSClient::is_connected() {
   return get_connection_state() == SKWSConnectionState::kSKWSConnected;
 }
 
+namespace {
+struct WsTeardownArg {
+  esp_websocket_client_handle_t handle;
+  SKWSClient* self;
+};
+}  // namespace
+
+void SKWSClient::teardown_task(void* arg) {
+  auto* a = static_cast<WsTeardownArg*>(arg);
+  // Blocking: esp_websocket_client_stop() waits for the client's task to exit
+  // (up to one ~1 s poll cycle), destroy() frees its buffers. Run here, on a
+  // throwaway task, so it never blocks the connect/event-loop context.
+  esp_websocket_client_stop(a->handle);
+  esp_websocket_client_destroy(a->handle);
+  a->self->teardown_in_progress_.store(false);
+  delete a;
+  vTaskDelete(nullptr);
+}
+
+void SKWSClient::reap_async(esp_websocket_client_handle_t old) {
+  if (old == nullptr) {
+    return;
+  }
+  auto* arg = new WsTeardownArg{old, this};
+  if (xTaskCreate(&SKWSClient::teardown_task, "SKWSTeardown", 4096, arg, 1,
+                  nullptr) == pdPASS) {
+    // The task now owns `old` and clears teardown_in_progress_ when done.
+    pending_teardown_.store(nullptr);
+    return;
+  }
+  // Spawn failed (OOM). Do NOT reap synchronously: a ~1 s stop()+destroy() on
+  // the event loop would stall every consumer under the exact heap pressure
+  // this path exists for. Stash the handle and retry on the next loop tick;
+  // teardown_in_progress_ stays set so bring-up remains deferred (at most one
+  // un-reaped client, no leak beyond it).
+  delete arg;
+  pending_teardown_.store(old);
+  ESP_LOGW(__FILENAME__, "teardown task spawn failed; will retry next cycle");
+}
+
+void SKWSClient::detach_teardown() {
+  // Single atomic check-and-null: if two contexts race here, only one gets the
+  // handle, so it is stopped/destroyed exactly once (no double-free).
+  esp_websocket_client_handle_t old = client_.exchange(nullptr);
+  if (old == nullptr) {
+    return;
+  }
+  // Invalidate the old client's generation so any late event it dispatches
+  // while being reaped is dropped by websocket_event_handler.
+  client_generation_.fetch_add(1);
+  teardown_in_progress_.store(true);
+  reap_async(old);
+}
+
 void SKWSClient::restart() {
   // Set state first so event handler callbacks and send callsites see the
   // disconnected state and skip operations on the client being destroyed.
   set_connection_state(SKWSConnectionState::kSKWSDisconnected);
-  if (client_ != nullptr) {
-    esp_websocket_client_stop(client_);
-    esp_websocket_client_destroy(client_);
-    client_ = nullptr;
-  }
+  detach_teardown();
 }
 
 void SKWSClient::send_delta() {
@@ -1401,17 +1506,32 @@ void SKWSClient::send_delta() {
     if (sk_delta_queue_->data_available()) {
       std::vector<String> deltas;
       sk_delta_queue_->get_deltas(deltas);
+      bool first = true;
       for (const auto& delta : deltas) {
         int send_result = esp_websocket_client_send_text(
-            client_, delta.c_str(), delta.length(), kWsSendTimeoutTicks);
+            client_.load(), delta.c_str(), delta.length(), kWsDeltaSendTimeoutTicks);
         if (send_result < 0) {
-          ESP_LOGE(__FILENAME__,
-                   "WebSocket send failed (result=%d), restarting",
+          // Non-blocking send (0 timeout) did not complete: either brief
+          // ws-client lock contention (retry next cycle) or the transport
+          // backpressured and esp_websocket_client aborted the connection
+          // internally -- its disconnect/error event drives reconnect. Never
+          // block or tear the connection down from here. Deltas are
+          // supersedable, so drop the rest of this batch. See SignalK/SensESP#1033.
+          if (first) {
+            // get_deltas() builds one-shot metadata (units, zones, ...) into the
+            // first delta and marks it sent before it leaves the device. The
+            // first delta is the only one that can carry that metadata, so if its
+            // send is the one that fails, re-arm metadata for the next batch --
+            // otherwise the server runs without it until the next reconnect.
+            sk_delta_queue_->reset_meta_send();
+          }
+          ESP_LOGW(__FILENAME__,
+                   "Delta send incomplete (result=%d); dropping rest of batch",
                    send_result);
-          this->restart();
-          return;
+          break;
         }
         this->delta_tx_tick_producer_.set(1);
+        first = false;
       }
     }
   }
