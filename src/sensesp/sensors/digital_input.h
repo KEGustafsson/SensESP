@@ -102,15 +102,7 @@ class DigitalInputCounter : public DigitalInput, public Sensor<int> {
                       unsigned int read_delay, String config_path = "")
       : DigitalInputCounter(pin, pin_mode, interrupt_type, read_delay,
                             config_path, [this]() { this->counter_ = this->counter_ + 1; }) {
-    isr_event_ = event_loop()->onInterrupt(pin_, interrupt_type_, interrupt_handler_);
-
-    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
-      noInterrupts();
-      output_ = counter_;
-      counter_ = 0;
-      interrupts();
-      notify();
-    });
+    register_events();
   }
 
   virtual ~DigitalInputCounter() {
@@ -146,6 +138,17 @@ class DigitalInputCounter : public DigitalInput, public Sensor<int> {
     if (load_config == LoadConfig::kYes) {
       load();
     }
+  }
+
+  void register_events() {
+    isr_event_ = event_loop()->onInterrupt(pin_, interrupt_type_, interrupt_handler_);
+    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
+      noInterrupts();
+      output_ = counter_;
+      counter_ = 0;
+      interrupts();
+      notify();
+    });
   }
 
   unsigned int read_delay_;
@@ -194,15 +197,7 @@ class DigitalInputDebounceCounter : public DigitalInputCounter {
                             LoadConfig::kNo),
         ignore_interval_ms_{ignore_interval_ms} {
     load();
-    repeat_event_ = event_loop()->onRepeat(read_delay_, [this]() {
-      noInterrupts();
-      output_ = counter_;
-      counter_ = 0;
-      interrupts();
-      notify();
-    });
-    isr_event_ = event_loop()->onInterrupt(
-        pin_, interrupt_type, [this]() { this->handleInterrupt(); });
+    register_events();
   }
 
  private:
