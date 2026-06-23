@@ -303,6 +303,14 @@ static esp_err_t tofu_crt_bundle_attach(void* conf) {
 static void websocket_event_handler(void* handler_args,
                                     esp_event_base_t base,
                                     int32_t event_id, void* event_data) {
+  // Drop events from a client that has been handed off for destruction: the
+  // handler was registered with the generation current at build time; if that no
+  // longer matches the live generation, this callback is from a reaped client.
+  if (ws_client == nullptr ||
+      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handler_args)) !=
+          ws_client->client_generation()) {
+    return;
+  }
   esp_websocket_event_data_t* data = (esp_websocket_event_data_t*)event_data;
   switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
@@ -877,6 +885,16 @@ void SKWSClient::connect() {
     return;
   }
 
+  // Reap any client left from a previous attempt before starting a new one,
+  // off this context. While the reap is in flight, defer bring-up so at most one
+  // client ever exists; state stays Disconnected, so a later cycle retries.
+  if (client_ != nullptr) {
+    detach_teardown();
+  }
+  if (teardown_in_progress_.load()) {
+    return;
+  }
+
   // Discard any anchor candidate stashed by a previous attempt; it is only
   // committed after a fully successful connection (see on_connected). Clearing
   // here also prevents committing stale data if a resumed TLS session skips the
@@ -1315,6 +1333,15 @@ void SKWSClient::poll_access_request(const String server_address,
 }
 
 void SKWSClient::connect_ws(const String& host, const uint16_t port) {
+  // connect() reaps any prior client before dispatching here, so client_ is
+  // null and no teardown is in flight. Guard defensively against a leak.
+  if (client_ != nullptr || teardown_in_progress_.load()) {
+    ESP_LOGW(__FILENAME__, "connect_ws: prior client not reaped; deferring");
+    detach_teardown();
+    set_connection_state(SKWSConnectionState::kSKWSDisconnected);
+    return;
+  }
+
   // Discard any anchor candidate stashed by the earlier esp_http_client legs
   // (token check / access request). Only the WebSocket handshake -- the one
   // whose success reaches on_connected and proves the server holds the leaf's
@@ -1353,13 +1380,6 @@ void SKWSClient::connect_ws(const String& host, const uint16_t port) {
   }
 #endif
 
-  // Destroy any existing client
-  if (client_ != nullptr) {
-    esp_websocket_client_stop(client_);
-    esp_websocket_client_destroy(client_);
-    client_ = nullptr;
-  }
-
   client_ = esp_websocket_client_init(&config);
   if (client_ == nullptr) {
     ESP_LOGE(__FILENAME__, "Failed to initialize WebSocket client");
@@ -1367,9 +1387,13 @@ void SKWSClient::connect_ws(const String& host, const uint16_t port) {
     return;
   }
 
-  // Register event handler
-  esp_websocket_register_events(client_, WEBSOCKET_EVENT_ANY,
-                                websocket_event_handler, nullptr);
+  // Register the event handler tagged with the current generation, so that any
+  // late event from this client after it is later handed off for destruction is
+  // dropped by websocket_event_handler (generation mismatch).
+  esp_websocket_register_events(
+      client_, WEBSOCKET_EVENT_ANY, websocket_event_handler,
+      reinterpret_cast<void*>(
+          static_cast<uintptr_t>(client_generation_.load())));
 
   // Start the client
   esp_err_t err = esp_websocket_client_start(client_);
@@ -1389,15 +1413,53 @@ bool SKWSClient::is_connected() {
   return get_connection_state() == SKWSConnectionState::kSKWSConnected;
 }
 
+namespace {
+struct WsTeardownArg {
+  esp_websocket_client_handle_t handle;
+  SKWSClient* self;
+};
+}  // namespace
+
+void SKWSClient::teardown_task(void* arg) {
+  auto* a = static_cast<WsTeardownArg*>(arg);
+  // Blocking: esp_websocket_client_stop() waits for the client's task to exit
+  // (up to one ~1 s poll cycle), destroy() frees its buffers. Run here, on a
+  // throwaway task, so it never blocks the connect/event-loop context.
+  esp_websocket_client_stop(a->handle);
+  esp_websocket_client_destroy(a->handle);
+  a->self->teardown_in_progress_.store(false);
+  delete a;
+  vTaskDelete(nullptr);
+}
+
+void SKWSClient::detach_teardown() {
+  if (client_ == nullptr) {
+    return;
+  }
+  esp_websocket_client_handle_t old = client_;
+  client_ = nullptr;
+  // Invalidate the old client's generation so any late event it dispatches
+  // while being reaped is dropped by websocket_event_handler.
+  client_generation_.fetch_add(1);
+  teardown_in_progress_.store(true);
+  auto* arg = new WsTeardownArg{old, this};
+  if (xTaskCreate(&SKWSClient::teardown_task, "SKWSTeardown", 4096, arg, 1,
+                  nullptr) != pdPASS) {
+    // Spawn failed (OOM): reap synchronously rather than leak the handle. Rare;
+    // blocking here is an acceptable last resort.
+    ESP_LOGE(__FILENAME__, "teardown task spawn failed; reaping synchronously");
+    esp_websocket_client_stop(old);
+    esp_websocket_client_destroy(old);
+    teardown_in_progress_.store(false);
+    delete arg;
+  }
+}
+
 void SKWSClient::restart() {
   // Set state first so event handler callbacks and send callsites see the
   // disconnected state and skip operations on the client being destroyed.
   set_connection_state(SKWSConnectionState::kSKWSDisconnected);
-  if (client_ != nullptr) {
-    esp_websocket_client_stop(client_);
-    esp_websocket_client_destroy(client_);
-    client_ = nullptr;
-  }
+  detach_teardown();
 }
 
 void SKWSClient::send_delta() {

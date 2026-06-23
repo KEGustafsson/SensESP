@@ -116,6 +116,13 @@ class SKWSClient : public FileSystemSaveable,
   void connect();
   void loop();
   bool is_connected();
+  /// @brief Drop the current connection (detached, non-blocking teardown) and
+  /// let the reconnect path rebuild it.
+  ///
+  /// @warning client_ is not atomically swapped, so this must run on the SK
+  /// connection context only (the SKWSClient task today; the event loop after
+  /// the fold) — never concurrently with connect()/connect_ws() on another
+  /// task, or two teardowns could double-free the handle. See #1033.
   void restart();
   bool is_connect_due() const { return millis() >= next_attempt_ms_; }
   void send_delta();
@@ -291,6 +298,11 @@ class SKWSClient : public FileSystemSaveable,
   /// disconnect surfaces as kSKWSCertificateError rather than a plain disconnect.
   void flag_cert_error() { cert_error_.store(true); }
 
+  /// @brief Generation tag of the currently-valid client. The event handler
+  /// compares the generation it was registered with against this to drop
+  /// callbacks from a client that has been handed off for destruction.
+  uint32_t client_generation() const { return client_generation_.load(); }
+
  protected:
   // these are the actually used values
   String server_address_ = "";
@@ -357,6 +369,14 @@ class SKWSClient : public FileSystemSaveable,
       SKWSConnectionState::kSKWSDisconnected;
 
   esp_websocket_client_handle_t client_ = nullptr;
+  // Bumped on every teardown so the (singleton) event handler can drop late
+  // callbacks from a client that has been handed off for destruction. The
+  // handler is registered with the generation current at build time; an event
+  // whose generation != client_generation_ comes from a torn-down client.
+  std::atomic<uint32_t> client_generation_{0};
+  // True while a detached task is stopping+destroying a previous client.
+  // Bring-up is deferred until it clears, so at most one client ever exists.
+  std::atomic<bool> teardown_in_progress_{false};
   std::shared_ptr<SKDeltaQueue> sk_delta_queue_;
   /// @brief Emits the number of deltas sent since last report
   TaskQueueProducer<int> delta_tx_tick_producer_{0, event_loop(), 990};
@@ -420,6 +440,13 @@ class SKWSClient : public FileSystemSaveable,
   void poll_access_request(const String host, const uint16_t port,
                            const String href);
   void connect_ws(const String& host, const uint16_t port);
+  /// @brief Hand client_ to a detached one-shot task that stops+destroys it, so
+  /// the blocking teardown never runs on the caller's context. Nulls client_ and
+  /// bumps client_generation_ / sets teardown_in_progress_ immediately; no-op if
+  /// client_ is null. The OOM-spawn fallback reaps synchronously.
+  void detach_teardown();
+  /// @brief Body of the detached teardown task (stop+destroy+self-delete).
+  static void teardown_task(void* arg);
   void subscribe_listeners();
   bool get_mdns_service(String& server_address, uint16_t& server_port);
   bool detect_ssl();
