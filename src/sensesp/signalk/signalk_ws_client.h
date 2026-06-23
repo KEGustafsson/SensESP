@@ -463,7 +463,9 @@ class SKWSClient : public FileSystemSaveable,
   /// @brief Hand client_ to a detached one-shot task that stops+destroys it, so
   /// the blocking teardown never runs on the caller's context. Nulls client_ and
   /// bumps client_generation_ / sets teardown_in_progress_ immediately; no-op if
-  /// client_ is null. The OOM-spawn fallback reaps synchronously.
+  /// client_ is null. If the reaper task can't be spawned (OOM), the handle is
+  /// stashed in pending_teardown_ and the spawn is retried on the next event-loop
+  /// tick -- never reaped synchronously, which would block the loop.
   void detach_teardown();
   /// @brief Spawn the detached reaper for `old`; on spawn failure (OOM) stash it
   /// in pending_teardown_ for a later retry instead of blocking the loop with a
