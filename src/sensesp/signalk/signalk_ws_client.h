@@ -119,10 +119,11 @@ class SKWSClient : public FileSystemSaveable,
   /// @brief Drop the current connection (detached, non-blocking teardown) and
   /// let the reconnect path rebuild it.
   ///
-  /// @warning client_ is not atomically swapped, so this must run on the SK
-  /// connection context only (the SKWSClient task today; the event loop after
-  /// the fold) — never concurrently with connect()/connect_ws() on another
-  /// task, or two teardowns could double-free the handle. See #1033.
+  /// @warning Must run on the SK connection context only (the SKWSClient task
+  /// today; the event loop after the fold). It does not check auth_job_running_,
+  /// so calling it concurrently with a running connect worker could interleave
+  /// its client_.exchange(nullptr) with the worker's client_.store(h) and orphan
+  /// a live client (leak + dropped events). Has no callers today. See #1033.
   void restart();
   bool is_connect_due() const { return millis() >= next_attempt_ms_; }
   void send_delta();
@@ -368,7 +369,15 @@ class SKWSClient : public FileSystemSaveable,
   SKWSConnectionState task_connection_state_ =
       SKWSConnectionState::kSKWSDisconnected;
 
-  esp_websocket_client_handle_t client_ = nullptr;
+  // Atomic for pointer-atomicity: the connect worker builds/stores it; the
+  // SK/event-loop context loads it to send and reaps it via exchange(nullptr)
+  // (single check-and-null, so no double-free). Writers are serialized
+  // single-owner-at-a-time by auth_job_running_ / teardown_in_progress_.
+  // NOTE: the atomic does NOT confer lifetime safety — a cross-task sender that
+  // already loaded the handle can still race the detached teardown's destroy()
+  // (narrow window, pre-existing since the teardown was detached; tracked for
+  // the fold commit, where all sends move onto one context). See #1033.
+  std::atomic<esp_websocket_client_handle_t> client_{nullptr};
   // Bumped on every teardown so the (singleton) event handler can drop late
   // callbacks from a client that has been handed off for destruction. The
   // handler is registered with the generation current at build time; an event
@@ -377,6 +386,10 @@ class SKWSClient : public FileSystemSaveable,
   // True while a detached task is stopping+destroying a previous client.
   // Bring-up is deferred until it clears, so at most one client ever exists.
   std::atomic<bool> teardown_in_progress_{false};
+  // True while a one-shot worker is running a (blocking) connect attempt
+  // (mDNS / SSL-detect / access-request / poll legs). The dispatcher skips
+  // while it is set, so at most one attempt runs at a time.
+  std::atomic<bool> auth_job_running_{false};
   std::shared_ptr<SKDeltaQueue> sk_delta_queue_;
   /// @brief Emits the number of deltas sent since last report
   TaskQueueProducer<int> delta_tx_tick_producer_{0, event_loop(), 990};
@@ -447,6 +460,11 @@ class SKWSClient : public FileSystemSaveable,
   void detach_teardown();
   /// @brief Body of the detached teardown task (stop+destroy+self-delete).
   static void teardown_task(void* arg);
+  /// @brief The (blocking) connect attempt — mDNS resolve, SSL detect, and the
+  /// access-request / poll / connect_ws leg. Run on a one-shot worker task so
+  /// none of it blocks the SK/event-loop context. connect() is the dispatcher.
+  void run_connect_attempt();
+  static void connect_worker(void* arg);
   void subscribe_listeners();
   bool get_mdns_service(String& server_address, uint16_t& server_port);
   bool detect_ssl();
