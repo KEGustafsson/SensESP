@@ -9,8 +9,8 @@
  * sentinel (e.g. float -> -1e9, uint8_t -> 0xff). A value is "invalid" only
  * when it equals that sentinel. A default-constructed Nullable holds T{} (0),
  * which is therefore VALID for types whose sentinel differs from 0 (int,
- * float, uint8_t). Nullable<bool> is unsupported and fails to compile (bool
- * has no spare sentinel value); see #883.
+ * float, uint8_t). Nullable<bool> is a flag-based specialization: true, false,
+ * and invalid are all distinct (see test/native/test_nullable_bool and #883).
  */
 
 #include <Arduino.h>
@@ -116,6 +116,20 @@ void test_nullable_from_json_value_is_valid() {
 }
 
 // ---------------------------------------------------------------------------
+// Nullable<bool>: flag-based, so false is valid and distinct from invalid
+// ---------------------------------------------------------------------------
+
+void test_nullable_bool_tristate() {
+  NullableBool t = true;
+  NullableBool f = false;
+  NullableBool inv = NullableBool::invalid();
+  TEST_ASSERT_TRUE(t.is_valid());
+  TEST_ASSERT_TRUE(f.is_valid());
+  TEST_ASSERT_FALSE(inv.is_valid());
+  TEST_ASSERT_FALSE(f.value());
+}
+
+// ---------------------------------------------------------------------------
 // Test runner
 // ---------------------------------------------------------------------------
 
@@ -133,6 +147,7 @@ void setup() {
   RUN_TEST(test_nullable_to_json_valid_serializes_value);
   RUN_TEST(test_nullable_from_json_null_is_invalid);
   RUN_TEST(test_nullable_from_json_value_is_valid);
+  RUN_TEST(test_nullable_bool_tristate);
 
   UNITY_END();
 }

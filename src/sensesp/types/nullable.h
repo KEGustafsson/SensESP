@@ -1,8 +1,6 @@
 #ifndef SENSESP_SRC_SENSESP_TYPES_NULLABLE_H_
 #define SENSESP_SRC_SENSESP_TYPES_NULLABLE_H_
 
-#include <type_traits>
-
 #include "ArduinoJson.h"
 
 namespace sensesp {
@@ -16,18 +14,11 @@ namespace sensesp {
  * Nullable holds T{} (0), so it is valid for types whose sentinel differs from
  * 0; use Nullable<T>::invalid() to obtain the invalid value explicitly.
  *
- * Nullable<bool> is intentionally unsupported: bool has only two values, so
- * there is no spare bit pattern to reserve as an invalid sentinel without
- * making one of `true`/`false` indistinguishable from "missing". Use a plain
- * bool, or a wider type if you need a distinct invalid state.
+ * bool has no spare value to reserve as a sentinel, so Nullable<bool> is an
+ * explicit specialization (below) that tracks validity with a separate flag.
  */
 template <typename T>
 class Nullable {
-  static_assert(
-      !std::is_same<T, bool>::value,
-      "Nullable<bool> is not supported: bool has no spare sentinel value. Use a "
-      "plain bool, or a wider type if a distinct invalid state is needed.");
-
   public:
     Nullable() : value_{} {}
     Nullable(T value) : value_{value} {}
@@ -64,9 +55,59 @@ class Nullable {
     static T invalid_value_;
 };
 
+/**
+ * @brief Validity-flag specialization of Nullable for bool.
+ *
+ * bool has no spare value to reserve as an invalid sentinel, so unlike the
+ * primary template this specialization tracks validity with an explicit flag:
+ * `true`, `false`, and invalid are all distinct. A default-constructed
+ * Nullable<bool> is invalid (no value yet); construct from a bool for a valid
+ * value, or use invalid() for the missing state.
+ *
+ * invalid() returns a Nullable<bool> instance (not a bare bool) because there
+ * is no sentinel bool value to hand back; the only generic caller,
+ * RepeatExpiring::repeat_function(), accepts that directly.
+ */
+template <>
+class Nullable<bool> {
+  public:
+    Nullable() : value_{false}, valid_{false} {}
+    Nullable(bool value) : value_{value}, valid_{true} {}
+    Nullable<bool>& operator=(bool value) {
+      value_ = value;
+      valid_ = true;
+      return *this;
+    }
+    Nullable<bool>& operator=(const Nullable<bool>& other) = default;
+    operator bool() const {
+      return value_;
+    }
+
+    bool is_valid() const {
+      return valid_;
+    }
+
+    bool* ptr() {
+      return &value_;
+    }
+
+    static Nullable<bool> invalid() {
+      return Nullable<bool>();
+    }
+
+    bool value() const {
+      return value_;
+    }
+
+  private:
+    bool value_;
+    bool valid_;
+};
+
 typedef Nullable<int> NullableInt;
 typedef Nullable<float> NullableFloat;
 typedef Nullable<double> NullableDouble;
+typedef Nullable<bool> NullableBool;
 
 template <typename T>
 void convertFromJson(JsonVariantConst src, Nullable<T> &dst) {
