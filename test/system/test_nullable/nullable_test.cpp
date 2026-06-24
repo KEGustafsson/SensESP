@@ -15,6 +15,7 @@
 
 #include <Arduino.h>
 
+#include "sensesp/transforms/repeat.h"
 #include "sensesp/types/nullable.h"
 #include "unity.h"
 
@@ -129,6 +130,16 @@ void test_nullable_bool_tristate() {
   TEST_ASSERT_FALSE(f.value());
 }
 
+// RepeatExpiring<bool> is the #883 use case: its output type is Nullable<bool>
+// and repeat_function() emits this->get().invalid() on expiry. Instantiating it
+// compiles that emit path for bool; here we also check the valid path.
+void test_repeat_expiring_bool() {
+  RepeatExpiring<bool> repeat(1000, 5000);
+  repeat.set(false);
+  TEST_ASSERT_TRUE(repeat.get().is_valid());
+  TEST_ASSERT_FALSE(repeat.get().value());
+}
+
 // ---------------------------------------------------------------------------
 // Test runner
 // ---------------------------------------------------------------------------
@@ -148,6 +159,7 @@ void setup() {
   RUN_TEST(test_nullable_from_json_null_is_invalid);
   RUN_TEST(test_nullable_from_json_value_is_valid);
   RUN_TEST(test_nullable_bool_tristate);
+  RUN_TEST(test_repeat_expiring_bool);
 
   UNITY_END();
 }

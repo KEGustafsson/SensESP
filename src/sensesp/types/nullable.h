@@ -64,15 +64,24 @@ class Nullable {
  * Nullable<bool> is invalid (no value yet); construct from a bool for a valid
  * value, or use invalid() for the missing state.
  *
- * invalid() returns a Nullable<bool> instance (not a bare bool) because there
- * is no sentinel bool value to hand back; the only generic caller,
- * RepeatExpiring::repeat_function(), accepts that directly.
+ * This mirrors the primary template's public interface by hand -- keep the two
+ * in sync when that interface changes.
+ *
+ * Two intentional asymmetries with the primary template:
+ *  - invalid() returns a Nullable<bool> instance, not a bare bool: there is no
+ *    sentinel bool value to hand back. The only generic caller,
+ *    RepeatExpiring::repeat_function(), accepts it directly; generic code must
+ *    not assume invalid() yields a bare T.
+ *  - operator bool() and value() return the stored value regardless of validity
+ *    (an invalid Nullable<bool> reads as false), matching the primary's implicit
+ *    conversion. Check is_valid() before relying on the value.
  */
 template <>
 class Nullable<bool> {
   public:
     Nullable() : value_{false}, valid_{false} {}
     Nullable(bool value) : value_{value}, valid_{true} {}
+    Nullable(const Nullable<bool>& other) = default;
     Nullable<bool>& operator=(bool value) {
       value_ = value;
       valid_ = true;
@@ -87,7 +96,10 @@ class Nullable<bool> {
       return valid_;
     }
 
+    // Mirrors the primary template's write-makes-valid behavior: handing out
+    // mutable storage marks the value valid (it cannot clear validity).
     bool* ptr() {
+      valid_ = true;
       return &value_;
     }
 
