@@ -6,6 +6,8 @@
 #include <ESPmDNS.h>
 #include <esp_http_client.h>
 
+#include "sensesp/signalk/signalk_ws_delta_size.h"
+
 #ifdef SENSESP_SSL_SUPPORT
 #include <mbedtls/pem.h>
 #include <mbedtls/sha256.h>
@@ -36,6 +38,9 @@ constexpr TickType_t kWsSendTimeoutTicks = pdMS_TO_TICKS(5000);
 // the event loop). 0 = enqueue if the ws-client lock and transport are free
 // right now, otherwise fail fast. Deltas are supersedable. See SignalK/SensESP#1033.
 constexpr TickType_t kWsDeltaSendTimeoutTicks = 0;
+// A device that keeps producing a delta larger than the buffer would drop one
+// every send cycle; rate-limit the warning so it does not flood the log.
+constexpr uint32_t kOversizeDropLogIntervalMs = 10000;
 
 SKWSClient* ws_client;
 
@@ -1404,7 +1409,7 @@ void SKWSClient::connect_ws(const String& host, const uint16_t port) {
   esp_websocket_client_config_t config = {};
   config.uri = url.c_str();
   config.task_stack = kWsTransportTaskStackSize;
-  config.buffer_size = 1024;
+  config.buffer_size = SENSESP_SK_WS_BUFFER_SIZE;
   if (auth_header.length() > 0) {
     config.headers = auth_header.c_str();
   }
@@ -1521,6 +1526,30 @@ void SKWSClient::send_delta() {
       sk_delta_queue_->get_deltas(deltas);
       bool first = true;
       for (const auto& delta : deltas) {
+        if (sk_delta_exceeds_ws_buffer(delta.length(),
+                                       SENSESP_SK_WS_BUFFER_SIZE)) {
+          // Drop the delta to keep the connection alive (signalk_ws_delta_size.h
+          // explains why an oversize delta would otherwise abort it). Unlike the
+          // transient send failure below, an oversize delta is deterministic, so
+          // do NOT re-arm metadata here: get_deltas() already bundles metadata
+          // into the first delta and marks it sent, and re-arming would have
+          // get_deltas() rebuild the same oversize first delta every cycle --
+          // dropped and re-armed forever, never delivered. Leaving it sent lets
+          // the next, metadata-free first delta fit and flow; metadata waits for
+          // a reconnect or a larger SENSESP_SK_WS_BUFFER_SIZE.
+          uint32_t now = millis();
+          if (last_oversize_log_ms_ == 0 ||
+              now - last_oversize_log_ms_ >= kOversizeDropLogIntervalMs) {
+            ESP_LOGW(__FILENAME__,
+                     "Delta too large (%u B > %u buffer); dropped to keep the "
+                     "connection alive -- raise SENSESP_SK_WS_BUFFER_SIZE",
+                     (unsigned)delta.length(),
+                     (unsigned)SENSESP_SK_WS_BUFFER_SIZE);
+            last_oversize_log_ms_ = now;
+          }
+          first = false;
+          continue;
+        }
         int send_result = esp_websocket_client_send_text(
             client_.load(), delta.c_str(), delta.length(), kWsDeltaSendTimeoutTicks);
         if (send_result < 0) {
