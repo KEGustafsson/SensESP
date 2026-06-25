@@ -35,6 +35,17 @@
 #define SENSESP_MAX_RECEIVED_META_UPDATES 20
 #endif
 
+// Signal K WebSocket buffer size in bytes, allocated by esp_websocket_client for
+// both the tx and rx buffer. send_delta drops any delta longer than this rather
+// than let esp_websocket_client split it across non-blocking writes and abort
+// the connection (see signalk_ws_delta_size.h). Override per board via
+// build_flags to hold the largest delta a device sends (e.g. a GNSS receiver's
+// full-sky satellitesInView); kept small by default for memory-constrained
+// boards.
+#ifndef SENSESP_SK_WS_BUFFER_SIZE
+#define SENSESP_SK_WS_BUFFER_SIZE 1024
+#endif
+
 namespace sensesp {
 
 static const char* NULL_AUTH_TOKEN = "";
@@ -402,6 +413,11 @@ class SKWSClient : public FileSystemSaveable,
   TaskQueueProducer<int> delta_tx_tick_producer_{0, event_loop(), 990};
   Integrator<int, int> delta_tx_count_producer_{1, 0, ""};
   Integrator<int, int> delta_rx_count_producer_{1, 0, ""};
+
+  /// @brief millis() timestamp of the last oversize-delta-drop warning, used to
+  /// rate-limit it when a device keeps producing a delta larger than the buffer.
+  /// 0 = never logged, so the next drop logs immediately.
+  uint32_t last_oversize_log_ms_ = 0;
 
   /// @brief A single received delta entry awaiting dispatch on the main task.
   ///
