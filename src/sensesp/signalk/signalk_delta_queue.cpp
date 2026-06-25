@@ -111,7 +111,7 @@ void SKDeltaQueue::get_deltas(std::vector<String>& output) {
     String delta;
     serializeJson(json_doc, delta);
     output.push_back(std::move(delta));
-    ESP_LOGD(__FILENAME__, "delta: %s", output.back().c_str());
+    ESP_LOGV(__FILENAME__, "delta: %s", output.back().c_str());
     return;
   }
 
@@ -162,7 +162,7 @@ void SKDeltaQueue::get_deltas(std::vector<String>& output) {
 
     String delta;
     serializeJson(json_doc, delta);
-    ESP_LOGD(__FILENAME__, "delta: %s", delta.c_str());
+    ESP_LOGV(__FILENAME__, "delta: %s", delta.c_str());
     output.push_back(std::move(delta));
   }
 
@@ -182,7 +182,7 @@ void SKDeltaQueue::get_deltas(std::vector<String>& output) {
 
     String delta;
     serializeJson(json_doc, delta);
-    ESP_LOGD(__FILENAME__, "delta: %s", delta.c_str());
+    ESP_LOGV(__FILENAME__, "delta: %s", delta.c_str());
     output.push_back(std::move(delta));
   }
 }
